@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anime-dub-tools"
+version = "0.2.0"
+description = "Dub one anime episode into English from its audio and English subtitles."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+separate = ["audio-separator[cpu]>=0.36"]
+diarize = ["pyannote.audio>=4.0"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["anime_dub_tools*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "live_models: import or run optional separation, diarization, or TTS weights",
+]
+testpaths = ["tests"]
