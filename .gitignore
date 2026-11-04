@@ -1,0 +1,9 @@
+.env
+*.wav
+*.mkv
+*.mp4
+*.vtt
+*.rttm
+__pycache__/
+.venv/
+*-venv/
