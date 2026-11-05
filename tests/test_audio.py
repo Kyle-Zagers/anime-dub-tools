@@ -49,7 +49,7 @@ def test_mix_places_a_line_on_a_silent_bed(tmp_path: Path):
     write_wav(bed, np.zeros(DIALOGUE_RATE, dtype=np.float32), DIALOGUE_RATE)
     tone = 0.4 * np.sin(2 * np.pi * 440 * np.arange(DIALOGUE_RATE // 2, dtype=np.float32) / DIALOGUE_RATE)
     write_wav(line, tone, DIALOGUE_RATE)
-    mix_tracks(bed, [(line, 0.25)], out, 1.0, DIALOGUE_RATE)
+    mix_tracks(bed, [(line, 0.25)], out, 1.0)
     mixed = load_mono(out, DIALOGUE_RATE)
     start = int(0.25 * DIALOGUE_RATE)
     assert float(np.max(np.abs(mixed[:start]))) < 1e-4

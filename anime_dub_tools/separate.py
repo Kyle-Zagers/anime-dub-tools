@@ -3,12 +3,23 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from anime_dub_tools.audio import load_mono, media_duration, slice_samples, write_wav
+import numpy as np
+
+from anime_dub_tools.audio import (
+    BED_RATE,
+    load_audio,
+    pad_trim_2d,
+    resample_linear,
+    stereo_bed,
+    write_audio,
+)
 from anime_dub_tools.models import DubError
 
-# Mel-Band RoFormer is the current audio-separator Python default and is aimed
-# at vocal quality. Swap it with --separator-model, including other UVR names.
-DEFAULT_SEPARATOR_MODEL = "model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt"
+# Kimberley Jensen Mel-Band RoFormer, unwa FT2 bleedless checkpoint.
+# The fullness-tuned forks (FT2 without "bleedless", and the Gabox fullness
+# instrumentals) are not the default. The bed is still mix minus this vocal
+# estimate, not the checkpoint's own instrumental stem.
+DEFAULT_SEPARATOR_MODEL = "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt"
 
 
 class CopySeparator:
@@ -26,30 +37,52 @@ class CopySeparator:
 
 class RoformerSeparator:
     name = "roformer"
-    notice = None
 
     def __init__(self, model_filename: str) -> None:
         self.model_filename = model_filename
         self._separator = None
         self._output_dir: Path | None = None
+        self.notice = (
+            "backend=roformer. Kimberley Jensen Mel-Band RoFormer bleedless "
+            f"({model_filename}) at {BED_RATE} Hz stereo. The bed is the original "
+            "mix minus the vocal estimate. Channels beyond the stereo pair stay as they were."
+        )
 
     def separate(self, audio: Path, work_dir: Path) -> tuple[Path, Path]:
         work_dir.mkdir(parents=True, exist_ok=True)
+        mix, sample_rate = load_audio(audio)
+        mix = _at_bed_rate(mix, sample_rate)
+        pair, extra = _stereo_pair(mix)
+        pair_path = work_dir / "stereo_pair.wav"
+        write_audio(pair_path, pair, BED_RATE)
         separator = self._load(work_dir)
-        produced = separator.separate(str(audio))
+        try:
+            produced = separator.separate(str(pair_path))
+        except DubError:
+            raise
+        except Exception as exc:
+            raise DubError(
+                f"Vocal separation failed for {self.model_filename}. "
+                "The stereo bed was not replaced with an instrumental stem. "
+                f"{exc}"
+            ) from exc
         paths = [self._resolve(item, work_dir) for item in produced]
-        vocals = _first(paths, "vocals")
-        background = _first(paths, "background")
-        if vocals is None and background is None:
-            raise DubError(f"Separator did not return vocal or instrumental stems: {paths}")
-        if vocals is None and background is not None:
-            vocals = work_dir / "vocals.wav"
-            _subtract(audio, background, vocals)
-        elif background is None and vocals is not None:
-            background = work_dir / "background.wav"
-            _subtract(audio, vocals, background)
-        assert vocals is not None and background is not None
-        return vocals, background
+        vocal_path = _first(paths, "vocals")
+        if vocal_path is None:
+            raise DubError(
+                "The separator did not return a vocal estimate, so the bed was not built. "
+                "An instrumental or music/effects stem is not used in its place. "
+                f"Files: {', '.join(path.name for path in paths) or 'none'}."
+            )
+        vocals, vocal_rate = load_audio(vocal_path)
+        vocals = _at_bed_rate(vocals, vocal_rate)
+        bed_pair = stereo_bed(pair, vocals)
+        bed = bed_pair if extra is None else np.concatenate([bed_pair, extra], axis=1)
+        background = work_dir / "background.wav"
+        write_audio(background, bed, BED_RATE)
+        kept_vocals = work_dir / "vocals.wav"
+        write_audio(kept_vocals, pad_trim_2d(_as_stereo(vocals), pair.shape[0]), BED_RATE)
+        return kept_vocals, background
 
     def _load(self, work_dir: Path):
         if self._separator is not None and self._output_dir == work_dir:
@@ -62,9 +95,21 @@ class RoformerSeparator:
             log_level=logging.WARNING,
             output_dir=str(work_dir),
             output_format="WAV",
+            sample_rate=BED_RATE,
+            output_single_stem="Vocals",
             use_soundfile=True,
         )
-        separator.load_model(model_filename=self.model_filename)
+        try:
+            separator.load_model(model_filename=self.model_filename)
+        except DubError:
+            raise
+        except Exception as exc:
+            raise DubError(
+                f"Could not load vocal separation weights {self.model_filename}. "
+                "Install audio-separator and download the Kimberley Jensen Mel-Band "
+                "RoFormer bleedless checkpoint, or pass --separator-model. "
+                f"Underlying error: {exc}"
+            ) from exc
         self._separator = separator
         self._output_dir = work_dir
         return separator
@@ -110,10 +155,32 @@ def _separator_install_message() -> str:
     return (
         "Vocal isolation needs audio-separator "
         '(pip install "audio-separator[cpu]", or "audio-separator[gpu]" on NVIDIA). '
-        "The Mel-Band RoFormer weights download on first use into the audio-separator "
-        "cache. They are not gated. Pass --separator copy only when you intentionally "
-        "want the original mix left under the dub."
+        f"The default checkpoint is {DEFAULT_SEPARATOR_MODEL}, the Kimberley Jensen "
+        "Mel-Band RoFormer bleedless model, at 44.1 kHz stereo. It downloads on first "
+        "use and is not gated. Pass --separator copy only when you intentionally want "
+        "the original mix left under the dub."
     )
+
+
+def _at_bed_rate(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if sample_rate == BED_RATE:
+        return np.asarray(audio, dtype=np.float32)
+    count = max(1, int(round(audio.shape[0] * BED_RATE / sample_rate)))
+    columns = [resample_linear(audio[:, channel], count) for channel in range(audio.shape[1])]
+    return np.stack(columns, axis=1)
+
+
+def _stereo_pair(mix: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+    if mix.shape[1] == 1:
+        return np.repeat(mix, 2, axis=1), None
+    extra = mix[:, 2:] if mix.shape[1] > 2 else None
+    return mix[:, :2], extra
+
+
+def _as_stereo(vocals: np.ndarray) -> np.ndarray:
+    if vocals.shape[1] == 1:
+        return np.repeat(vocals, 2, axis=1)
+    return vocals[:, :2]
 
 
 def _kind(path: Path) -> str:
@@ -130,13 +197,3 @@ def _first(paths: list[Path], kind: str) -> Path | None:
         if _kind(path) == kind:
             return path
     return None
-
-
-def _subtract(mix: Path, stem: Path, destination: Path) -> None:
-    sample_rate = 44100
-    mix_audio = load_mono(mix, sample_rate)
-    stem_audio = load_mono(stem, sample_rate)
-    count = min(len(mix_audio), len(stem_audio))
-    write_wav(destination, mix_audio[:count] - stem_audio[:count], sample_rate)
-    if media_duration(destination) <= 0:
-        raise DubError(f"Could not build {destination.name} from the separated stem.")

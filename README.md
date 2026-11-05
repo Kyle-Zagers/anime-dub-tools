@@ -48,6 +48,8 @@ sudo apt-get install -y ffmpeg espeak-ng
 
 The default command isolates vocals, diarizes, and synthesizes. The quality of each stage depends on what is installed. Nothing below is bundled, and gated weights are not downloaded for you.
 
+A real episode still needs a GPU, a Hugging Face token for pyannote, and a local IndexTTS-2.5 checkpoint directory. MuseTalk weights are needed only when you pass `--lips`. Without them the picture is copied and the log says so. Missing IndexTTS or separator weights stop with an error instead of a traceback.
+
 | Stage | Backend | Install | Credentials |
 | --- | --- | --- | --- |
 | Isolate vocals | [audio-separator](https://github.com/nomadkaraoke/python-audio-separator) Mel-Band RoFormer | `pip install "audio-separator[gpu]"` or `pip install "audio-separator[cpu]"` | None. The checkpoint downloads on first use. |
@@ -69,7 +71,9 @@ python -m anime_dub_tools \
   --tts-model-dir "$INDEXTTS_MODEL_DIR"
 ```
 
-IndexTTS is the voice backend to use for a real dub. It clones each speaker from their isolated lines (`spk_audio_prompt`) and takes that line's own performance as the emotion reference (`emo_audio_prompt`). The text emotion model is left off. `duration_factor` aims at the cue, then ffmpeg time-fits whatever is left so the line does not drift.
+IndexTTS-2.5 is the voice backend to use for a real dub. The speaker reference is only the timbre prompt (`spk_audio_prompt`). Emotion is one style for the whole line, taken from that line's isolated source audio (`emo_audio_prompt`). Extreme takes raise `emo_alpha`. This is not a pitch-contour copy, and the text emotion model stays off. `duration_factor` stays between 0.5 and 2.0, then ffmpeg `atempo` finishes the fit.
+
+The vocal model is the Kimberley Jensen Mel-Band RoFormer bleedless checkpoint, `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt`, at 44.1 kHz stereo. The background is the original mixture minus that vocal estimate. It is not the model's instrumental stem, and it is not ducked. A mono source is given a stereo pair for that subtraction. If the episode has more than two channels, only the stereo pair is replaced and the extra channels are copied through. Pass `--separator-model` to try another checkpoint; a fullness-tuned fork is not the default.
 
 OpenVoice V2 is the swappable MIT-licensed cloner. It copies tone color from the episode and gets English rhythm from MeloTTS, then the same time-fit runs. It does not follow the original performance as closely.
 
@@ -107,8 +111,9 @@ If `auto` cannot import audio-separator, the command stops and tells you how to 
 | Diarization | pyannote community-1 is implemented and swappable. Without a token, a NumPy spectral clusterer runs instead. It is a real clusterer, not production diarization. |
 | Reference TTS | Implemented. espeak-ng speaks the line; pitch and loudness come from the speaker's audio and from that line. Harmonic fallback if espeak-ng is missing. |
 | IndexTTS and OpenVoice | Implemented against their current Python calls. They are not executed in tests. Weights are not downloaded here. |
-| Time-fit | Implemented with ffmpeg `atempo`, then a sample-accurate trim or pad onto the cue, or onto the vocal span inside that cue. |
-| Mix and mux | Implemented. Dialogue is mixed onto the background. Video inputs keep their picture when the output is a video container. |
+| Time-fit | Implemented with ffmpeg `atempo`, then a sample-accurate trim or pad onto the cue, or onto the vocal span inside that cue. IndexTTS `duration_factor` is clamped to 0.5–2.0 before that. |
+| Mix and mux | Implemented. Dialogue is added to the stereo pair at unity gain. Extra channels stay untouched. Video inputs keep their picture when the output is a video container. |
+| Lips | Off unless `--lips` is set. With MuseTalk weights, a mouth is patched only when one face is large, near-frontal, uncovered, and that face is the speaker. Every other frame, including off-screen lines, is copied. Missing weights copy the picture and say so. |
 
 Signs, songs, and on-screen text are dubbed if they are dialogue lines in the subtitle file. Delete those cues first if you do not want them spoken.
 
@@ -129,7 +134,7 @@ python -m anime_dub_tools \
 
 ## Tests
 
-Tests build a few seconds of tones and a tiny ASS or SRT file. They cover parsing, speaker assignment, duration fitting, and mix/mux. They do not download weights.
+Tests build a few seconds of tones, a stereo-plus-extra-channel fixture, and a tiny ASS or SRT file. They cover parsing, speaker assignment, the mix-minus-vocals bed, emotion weights, the mouth gate, duration fitting, and mix/mux. They do not download weights and they do not need a GPU. `--lips` is checked with the weights missing, which must copy the picture.
 
 ```bash
 pip install -e ".[dev]"
@@ -164,7 +169,7 @@ Any other episode uses the same command. The show title is not part of the tool.
 | Flag | Default | Role |
 | --- | --- | --- |
 | `--separator` | `auto` | `roformer` when audio-separator is installed, otherwise an error. `copy` keeps the original mix. |
-| `--separator-model` | Mel-Band RoFormer checkpoint | Passed through to audio-separator. |
+| `--separator-model` | `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt` | Kimberley Jensen Mel-Band RoFormer bleedless checkpoint. The bed is mix minus vocals at 44.1 kHz stereo. |
 | `--diarizer` | `auto` | pyannote when the token and package are both present, otherwise spectral. |
 | `--diarizer-model` | `pyannote/speaker-diarization-community-1` | Gated Hugging Face pipeline id. |
 | `--tts` | `auto` | IndexTTS if `config.yaml` is in the model dir, else OpenVoice if its converter checkpoint is present, else reference. |
@@ -173,3 +178,5 @@ Any other episode uses the same command. The show title is not part of the tool.
 | `--hf-token` | `HUGGINGFACE_API_KEY` or `HF_TOKEN` | Not printed. Do not commit it. |
 | `--device` | `auto` | `cpu` or `cuda`. CUDA is used only by the neural backends. |
 | `--keep-work` | temporary directory | Leave extracted audio, references, and line wavs on disk. |
+| `--lips` | off | Patch mouths with MuseTalk when one face passes the gate. Otherwise copy the frame. |
+| `--lips-model-dir` | `MUSETALK_MODEL_DIR` | MuseTalk weights. Used only with `--lips`. Missing weights copy the picture. |

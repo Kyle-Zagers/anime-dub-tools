@@ -25,6 +25,67 @@ def speech_seconds(text: str) -> float:
     return max(0.35, words / 2.6)
 
 
+BASE_EMO_ALPHA = 0.6
+EXTREME_EMO_ALPHA = 1.0
+
+
+def duration_factor_for(target_duration: float, text: str) -> float:
+    return float(np.clip(target_duration / speech_seconds(text), 0.5, 2.0))
+
+
+def emo_alpha_for_line(samples: np.ndarray) -> float:
+    """One style weight for the whole line, from how extreme the take is.
+
+    This is not a pitch contour. A steady take stays at the base weight.
+    A shouted or bursty take raises it. The same value covers the whole line.
+    """
+    audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if audio.size == 0:
+        return BASE_EMO_ALPHA
+    rms = float(np.sqrt(np.mean(audio * audio)))
+    if rms < 1e-4:
+        return BASE_EMO_ALPHA
+    crest = float(np.max(np.abs(audio))) / rms
+    hop = 256
+    usable = audio[: len(audio) - (len(audio) % hop)]
+    if usable.size < hop * 4:
+        modulation = 0.0
+    else:
+        energy = np.sqrt(np.mean(usable.reshape(-1, hop) ** 2, axis=1))
+        modulation = float(np.std(energy) / (float(np.mean(energy)) + 1e-6))
+    if crest >= 4.5 or modulation >= 0.85:
+        return EXTREME_EMO_ALPHA
+    return BASE_EMO_ALPHA
+
+
+def indextts_infer_kwargs(
+    text: str,
+    speaker: Path,
+    emotion: Path | None,
+    destination: Path,
+    factor: float,
+    emo_alpha: float,
+) -> dict:
+    if emotion is None:
+        raise DubError(
+            "IndexTTS-2.5 needs the line's isolated audio as emo_audio_prompt. "
+            "The speaker reference is only the timbre prompt. No text emotion model is used."
+        )
+    bounded = float(np.clip(factor, 0.5, 2.0))
+    return {
+        "spk_audio_prompt": str(speaker),
+        "text": text,
+        "output_path": str(destination),
+        "emo_audio_prompt": str(emotion),
+        "emo_alpha": float(emo_alpha),
+        "use_emo_text": False,
+        "verbose": False,
+        "interval_silence": 80,
+        "lang": "EN",
+        "duration_factor": bounded,
+    }
+
+
 class ReferenceSynthesizer:
     """English pronunciation from espeak-ng, identity from the episode audio.
 
@@ -108,10 +169,12 @@ class ReferenceSynthesizer:
 
 
 class IndexTTSSynthesizer:
-    """IndexTTS-2.5 (or 2.x) cloning. Emotion comes from the line's own audio.
+    """IndexTTS-2.5 cloning. Timbre and emotion are separate prompts.
 
-    ``use_qwen_emo`` and ``use_emo_text`` stay off. Duration is requested with
-    ``duration_factor`` on 2.5, then ffmpeg fits whatever residual remains.
+    The speaker reference is only ``spk_audio_prompt``. ``emo_audio_prompt`` is
+    that line's isolated source audio, one style for the whole line. Extreme
+    lines get a higher ``emo_alpha``. ``duration_factor`` stays in 0.5–2.0 and
+    ffmpeg atempo finishes the fit. The text emotion model stays off.
     """
 
     name = "indextts"
@@ -120,10 +183,10 @@ class IndexTTSSynthesizer:
         self.model_dir = model_dir
         self.device = device
         self._tts = None
-        self._generation = ""
         self.notice = (
-            "backend=indextts. Each speaker is cloned from their own isolated lines. "
-            "The matching line is the emotion reference, so no emotion classifier is used."
+            "backend=indextts. Timbre comes from the speaker reference. "
+            "Emotion is one style taken from that line's isolated audio, "
+            "with a higher emo_alpha when the take is extreme. Not a pitch contour."
         )
 
     @property
@@ -138,76 +201,79 @@ class IndexTTSSynthesizer:
         target_duration: float,
         destination: Path,
     ) -> None:
-        tts, generation = self._load()
+        tts = self._load()
         target_duration = max(0.12, float(target_duration))
-        factor = float(np.clip(target_duration / speech_seconds(text), 0.5, 2.0))
+        if emotion_reference is None:
+            raise DubError(
+                "IndexTTS-2.5 needs the line's isolated audio as emo_audio_prompt."
+            )
+        alpha = emo_alpha_for_line(load_mono(emotion_reference, DIALOGUE_RATE))
+        print(f"[tts] emo_alpha={alpha:.2f} prompt=line-audio", flush=True)
+        factor = duration_factor_for(target_duration, text)
         raw = destination.with_suffix(".tts.wav")
         try:
-            self._infer(tts, generation, text, speaker_reference, emotion_reference, raw, factor)
+            self._infer(tts, text, speaker_reference, emotion_reference, raw, factor, alpha)
             produced = _wav_seconds(raw)
-            if generation == "2.5" and produced > 0 and not 0.85 <= produced / target_duration <= 1.15:
+            if produced > 0 and not 0.85 <= produced / target_duration <= 1.15:
                 adjusted = float(np.clip(factor * (target_duration / produced), 0.5, 2.0))
-                self._infer(tts, generation, text, speaker_reference, emotion_reference, raw, adjusted)
+                self._infer(tts, text, speaker_reference, emotion_reference, raw, adjusted, alpha)
             fit_duration(raw, destination, target_duration, DIALOGUE_RATE)
+        except DubError:
+            raise
+        except Exception as exc:
+            raise DubError(
+                "IndexTTS-2.5 failed while cloning a line. Check --tts-model-dir and the GPU. "
+                f"{exc}"
+            ) from exc
         finally:
             raw.unlink(missing_ok=True)
 
     def _load(self):
         if self._tts is not None:
-            return self._tts, self._generation
+            return self._tts
         config = self.model_dir / "config.yaml"
         if not config.is_file():
             raise DubError(
-                f"IndexTTS config.yaml was not found in {self.model_dir}. "
-                "Download IndexTTS-2.5 checkpoints into that directory and pass --tts-model-dir."
+                f"IndexTTS-2.5 config.yaml was not found in {self.model_dir}. "
+                "Download the 2.5 checkpoints into that directory and pass --tts-model-dir."
             )
-        generation = "2.5"
         try:
             from indextts.infer_v2_5 import IndexTTS2
-        except ImportError:
-            try:
-                from indextts.infer_v2 import IndexTTS2
-                generation = "2"
-            except ImportError as exc:
-                raise DubError(
-                    "IndexTTS is not installed. From a GPU machine:\n"
-                    "  pip install git+https://github.com/index-tts/index-tts\n"
-                    "Put config.yaml and the 2.5 weights in --tts-model-dir. "
-                    "Weights are not downloaded by this pipeline."
-                ) from exc
-        kwargs = {
-            "cfg_path": str(config),
-            "model_dir": str(self.model_dir),
-            "device": self.device,
-        }
-        if generation == "2.5":
-            kwargs["use_bf16"] = self.device.startswith("cuda")
-            kwargs["use_qwen_emo"] = False
-        else:
-            kwargs["use_fp16"] = False
-            kwargs["use_cuda_kernel"] = False
-        self._tts = IndexTTS2(**kwargs)
-        self._generation = generation
-        return self._tts, self._generation
+        except ImportError as exc:
+            raise DubError(
+                "IndexTTS-2.5 is not installed. Per-line emotion uses that release only.\n"
+                "  pip install git+https://github.com/index-tts/index-tts\n"
+                "Put config.yaml and the 2.5 weights in --tts-model-dir. "
+                "This pipeline does not download them."
+            ) from exc
+        try:
+            self._tts = IndexTTS2(
+                cfg_path=str(config),
+                model_dir=str(self.model_dir),
+                device=self.device,
+                use_bf16=self.device.startswith("cuda"),
+                use_qwen_emo=False,
+            )
+        except Exception as exc:
+            raise DubError(
+                f"Could not load IndexTTS-2.5 weights from {self.model_dir}. "
+                f"The checkpoint files are missing or unreadable. {exc}"
+            ) from exc
+        return self._tts
 
     @staticmethod
-    def _infer(tts, generation: str, text: str, speaker: Path, emotion: Path | None, destination: Path, factor: float) -> None:
-        kwargs = {
-            "spk_audio_prompt": str(speaker),
-            "text": text,
-            "output_path": str(destination),
-            "emo_audio_prompt": str(emotion) if emotion else None,
-            "emo_alpha": 0.85,
-            "use_emo_text": False,
-            "verbose": False,
-            "interval_silence": 80,
-        }
-        if generation == "2.5":
-            kwargs["lang"] = "EN"
-            kwargs["duration_factor"] = factor
-        tts.infer(**kwargs)
+    def _infer(
+        tts,
+        text: str,
+        speaker: Path,
+        emotion: Path | None,
+        destination: Path,
+        factor: float,
+        emo_alpha: float,
+    ) -> None:
+        tts.infer(**indextts_infer_kwargs(text, speaker, emotion, destination, factor, emo_alpha))
         if not destination.is_file():
-            raise DubError(f"IndexTTS did not write {destination}")
+            raise DubError(f"IndexTTS-2.5 did not write {destination}")
 
 
 class OpenVoiceSynthesizer:

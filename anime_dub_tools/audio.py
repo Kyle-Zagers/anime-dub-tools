@@ -9,6 +9,7 @@ import numpy as np
 from anime_dub_tools.models import DubError
 
 DIALOGUE_RATE = 22050
+BED_RATE = 44100
 
 
 def require_ffmpeg() -> None:
@@ -65,6 +66,11 @@ def has_video_stream(path: Path) -> bool:
 
 
 def extract_audio(episode: Path, destination: Path) -> None:
+    """Resample to 44.1 kHz and keep every channel.
+
+    A 5.1 source stays 5.1. The stereo pair is replaced later; the other
+    channels are not folded into it here.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     run_cmd(
         [
@@ -73,15 +79,37 @@ def extract_audio(episode: Path, destination: Path) -> None:
             "-i",
             str(episode),
             "-vn",
-            "-ac",
-            "2",
             "-ar",
-            "44100",
+            str(BED_RATE),
             "-c:a",
             "pcm_s16le",
             str(destination),
         ]
     )
+
+
+def probe_audio(path: Path) -> tuple[int, int]:
+    result = run_cmd(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate,channels",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise DubError(f"Could not read the channel layout of {path}")
+    try:
+        return int(lines[0]), int(lines[1])
+    except ValueError as exc:
+        raise DubError(f"Could not read the channel layout of {path}") from exc
 
 
 def load_mono(path: Path, sample_rate: int = DIALOGUE_RATE) -> np.ndarray:
@@ -117,16 +145,97 @@ def load_mono(path: Path, sample_rate: int = DIALOGUE_RATE) -> np.ndarray:
 
 
 def write_wav(path: Path, samples: np.ndarray, sample_rate: int = DIALOGUE_RATE) -> None:
+    mono = np.asarray(samples, dtype=np.float32)
+    if mono.ndim == 1:
+        mono = mono[:, None]
+    write_audio(path, mono, sample_rate)
+
+
+def load_audio(path: Path) -> tuple[np.ndarray, int]:
+    """Return float audio as (samples, channels) at the file's own rate."""
+    sample_rate, channels = probe_audio(path)
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-ac",
+            str(channels),
+            "-ar",
+            str(sample_rate),
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "pipe:1",
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace")[-2000:]
+        raise DubError(f"Could not read audio from {path}\n{detail}")
+    raw = result.stdout
+    width = channels * 2
+    if width and len(raw) % width:
+        raw = raw[: len(raw) - (len(raw) % width)]
+    if not raw:
+        return np.zeros((0, channels), dtype=np.float32), sample_rate
+    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, channels)
+    return pcm / 32768.0, sample_rate
+
+
+def write_audio(path: Path, samples: np.ndarray, sample_rate: int) -> None:
     import wave
 
+    audio = np.asarray(samples, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
     path.parent.mkdir(parents=True, exist_ok=True)
-    clipped = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
+    clipped = np.clip(audio, -1.0, 1.0)
     pcm = (clipped * 32767.0).astype("<i2")
     with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(1)
+        handle.setnchannels(pcm.shape[1])
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(pcm.tobytes())
+
+
+def pad_trim_2d(samples: np.ndarray, count: int) -> np.ndarray:
+    audio = np.asarray(samples, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if count <= 0:
+        return np.zeros((0, audio.shape[1]), dtype=np.float32)
+    if audio.shape[0] == count:
+        return audio
+    if audio.shape[0] > count:
+        return audio[:count].copy()
+    out = np.zeros((count, audio.shape[1]), dtype=np.float32)
+    out[: audio.shape[0]] = audio
+    return out
+
+
+def stereo_bed(mix: np.ndarray, vocals: np.ndarray) -> np.ndarray:
+    """Original mix minus the vocal estimate on the stereo pair only.
+
+    Channels after the first two are copied unchanged. This is not a
+    dialogue/music/effects stem and it is not a mono downmix.
+    """
+    bed = np.asarray(mix, dtype=np.float32)
+    if bed.ndim != 2 or bed.shape[1] < 1:
+        raise DubError("The background mix must be a (samples, channels) array.")
+    estimate = np.asarray(vocals, dtype=np.float32)
+    if estimate.ndim == 1:
+        estimate = estimate[:, None]
+    pair_count = min(2, bed.shape[1])
+    if estimate.shape[1] == 1 and pair_count == 2:
+        estimate = np.repeat(estimate, 2, axis=1)
+    estimate = pad_trim_2d(estimate[:, :pair_count], bed.shape[0])
+    output = bed.copy()
+    output[:, :pair_count] = bed[:, :pair_count] - estimate
+    return output
 
 
 def pad_trim(samples: np.ndarray, count: int) -> np.ndarray:
@@ -289,27 +398,48 @@ def mix_tracks(
     lines: list[tuple[Path, float]],
     destination: Path,
     duration: float,
-    sample_rate: int = DIALOGUE_RATE,
 ) -> None:
+    """Add dialogue to the stereo pair at unity gain.
+
+    The bed is not ducked and not folded to mono. Channels beyond stereo
+    are left untouched. A final scale runs only when the sum would clip.
+    """
+    bed, sample_rate = load_audio(background)
     count = max(1, int(round(duration * sample_rate)))
-    mix = pad_trim(load_mono(background, sample_rate), count) * 0.8
+    mix = pad_trim_2d(bed, count)
     for path, start in lines:
-        audio = load_mono(path, sample_rate)
+        line, line_rate = load_audio(path)
+        mono = line.mean(axis=1) if line.shape[1] > 1 else line[:, 0]
+        if line_rate != sample_rate and len(mono):
+            mono = resample_linear(mono, max(1, int(round(len(mono) * sample_rate / line_rate))))
         index = int(round(start * sample_rate))
         if index >= count:
             continue
         if index < 0:
-            audio = audio[-index:]
+            mono = mono[-index:]
             index = 0
-        stop = min(count, index + len(audio))
-        mix[index:stop] += audio[: stop - index]
-    peak = float(np.max(np.abs(mix))) if len(mix) else 0.0
+        stop = min(count, index + len(mono))
+        segment = mono[: stop - index]
+        if mix.shape[1] == 1:
+            mix[index:stop, 0] += segment
+        else:
+            mix[index:stop, 0] += segment
+            mix[index:stop, 1] += segment
+    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
     if peak > 0.98:
         mix *= 0.98 / peak
-    write_wav(destination, mix, sample_rate)
+    write_audio(destination, mix, sample_rate)
 
 
-def mux(episode: Path, mix_wav: Path, destination: Path) -> None:
+def mux(
+    episode: Path,
+    mix_wav: Path,
+    destination: Path,
+    *,
+    lips: bool = False,
+    lips_model_dir: Path | None = None,
+    spoken_spans: list[tuple[float, float]] | None = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     suffix = destination.suffix.lower()
     if suffix == ".wav":
@@ -318,13 +448,17 @@ def mux(episode: Path, mix_wav: Path, destination: Path) -> None:
         audio_args = ["-c:a", "flac"]
     else:
         audio_args = ["-c:a", "aac", "-b:a", "192k"]
-    if has_video_stream(episode) and suffix not in {".wav", ".flac", ".mp3", ".ogg", ".aac"}:
+    video_input = episode
+    video_out = has_video_stream(episode) and suffix not in {".wav", ".flac", ".mp3", ".ogg", ".aac"}
+    if video_out and lips:
+        video_input = _picture_for_lips(episode, mix_wav, destination, lips_model_dir, spoken_spans or [])
+    if video_out:
         run_cmd(
             [
                 "ffmpeg",
                 "-y",
                 "-i",
-                str(episode),
+                str(video_input),
                 "-i",
                 str(mix_wav),
                 "-map",
@@ -338,4 +472,28 @@ def mux(episode: Path, mix_wav: Path, destination: Path) -> None:
             ]
         )
         return
+    if lips:
+        print("[lips] there is no picture to patch", flush=True)
     run_cmd(["ffmpeg", "-y", "-i", str(mix_wav), *audio_args, str(destination)])
+
+
+def _picture_for_lips(
+    episode: Path,
+    mix_wav: Path,
+    destination: Path,
+    model_dir: Path | None,
+    spoken_spans: list[tuple[float, float]],
+) -> Path:
+    from anime_dub_tools.lips import lips_skip_message, render_lips
+
+    message = lips_skip_message(model_dir)
+    if message:
+        print(message, flush=True)
+        return episode
+    patched = destination.with_name(f"{destination.stem}.lips-picture.mkv")
+    try:
+        render_lips(episode, mix_wav, patched, model_dir, spoken_spans)
+    except Exception:
+        patched.unlink(missing_ok=True)
+        raise
+    return patched
