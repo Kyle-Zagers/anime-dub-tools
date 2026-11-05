@@ -73,7 +73,7 @@ python -m anime_dub_tools \
 
 IndexTTS-2.5 is the voice backend to use for a real dub. The speaker reference is only the timbre prompt (`spk_audio_prompt`). Emotion is one style for the whole line, taken from that line's isolated source audio (`emo_audio_prompt`). Extreme takes raise `emo_alpha`. This is not a pitch-contour copy, and the text emotion model stays off. `duration_factor` stays between 0.5 and 2.0, then ffmpeg `atempo` finishes the fit.
 
-The vocal model is the Kimberley Jensen Mel-Band RoFormer bleedless checkpoint, `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt`, at 44.1 kHz stereo. The background is the original mixture minus that vocal estimate. It is not the model's instrumental stem, and it is not ducked. A mono source is given a stereo pair for that subtraction. If the episode has more than two channels, only the stereo pair is replaced and the extra channels are copied through. Pass `--separator-model` to try another checkpoint; a fullness-tuned fork is not the default.
+The vocal model is the Kimberley Jensen Mel-Band RoFormer bleedless checkpoint, `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt`, at 44.1 kHz stereo. Outside each dubbed line the original mix is kept sample for sample, including any channels past stereo. Inside the line, the English dialogue is mixed over the original minus the vocal estimate. A fade of about 10 ms stays inside the line boundaries. Sounds that overlap the speech can still be removed with that vocal estimate. The bed is not the model's instrumental stem, and it is not ducked. A mono source is given a stereo pair for that subtraction. Pass `--separator-model` to try another checkpoint; a fullness-tuned fork is not the default.
 
 OpenVoice V2 is the swappable MIT-licensed cloner. It copies tone color from the episode and gets English rhythm from MeloTTS, then the same time-fit runs. It does not follow the original performance as closely.
 
@@ -112,7 +112,7 @@ If `auto` cannot import audio-separator, the command stops and tells you how to 
 | Reference TTS | Implemented. espeak-ng speaks the line; pitch and loudness come from the speaker's audio and from that line. Harmonic fallback if espeak-ng is missing. |
 | IndexTTS and OpenVoice | Implemented against their current Python calls. They are not executed in tests. Weights are not downloaded here. |
 | Time-fit | Implemented with ffmpeg `atempo`, then a sample-accurate trim or pad onto the cue, or onto the vocal span inside that cue. IndexTTS `duration_factor` is clamped to 0.5–2.0 before that. |
-| Mix and mux | Implemented. Dialogue is added to the stereo pair at unity gain. Extra channels stay untouched. Video inputs keep their picture when the output is a video container. |
+| Mix and mux | Implemented. Outside dialogue the original mix is copied. Inside each line the dubbed dialogue sits on the mix-minus-vocals bed, with a short fade inside the cue. Extra channels stay untouched. Video inputs keep their picture when the output is a video container. |
 | Lips | Off unless `--lips` is set. With MuseTalk weights, a mouth is patched only when one face is large, near-frontal, uncovered, and that face is the speaker. Every other frame, including off-screen lines, is copied. Missing weights copy the picture and say so. |
 
 Signs, songs, and on-screen text are dubbed if they are dialogue lines in the subtitle file. Delete those cues first if you do not want them spoken.
@@ -169,7 +169,7 @@ Any other episode uses the same command. The show title is not part of the tool.
 | Flag | Default | Role |
 | --- | --- | --- |
 | `--separator` | `auto` | `roformer` when audio-separator is installed, otherwise an error. `copy` keeps the original mix. |
-| `--separator-model` | `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt` | Kimberley Jensen Mel-Band RoFormer bleedless checkpoint. The bed is mix minus vocals at 44.1 kHz stereo. |
+| `--separator-model` | `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt` | Kimberley Jensen Mel-Band RoFormer bleedless checkpoint at 44.1 kHz. The vocal estimate is removed only under dubbed lines. |
 | `--diarizer` | `auto` | pyannote when the token and package are both present, otherwise spectral. |
 | `--diarizer-model` | `pyannote/speaker-diarization-community-1` | Gated Hugging Face pipeline id. |
 | `--tts` | `auto` | IndexTTS if `config.yaml` is in the model dir, else OpenVoice if its converter checkpoint is present, else reference. |

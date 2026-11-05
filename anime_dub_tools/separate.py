@@ -10,15 +10,14 @@ from anime_dub_tools.audio import (
     load_audio,
     pad_trim_2d,
     resample_linear,
-    stereo_bed,
     write_audio,
 )
 from anime_dub_tools.models import DubError
 
 # Kimberley Jensen Mel-Band RoFormer, unwa FT2 bleedless checkpoint.
 # The fullness-tuned forks (FT2 without "bleedless", and the Gabox fullness
-# instrumentals) are not the default. The bed is still mix minus this vocal
-# estimate, not the checkpoint's own instrumental stem.
+# instrumentals) are not the default. The vocal estimate is removed only under
+# dubbed lines, not across the whole file, and it is not an instrumental stem.
 DEFAULT_SEPARATOR_MODEL = "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt"
 
 
@@ -44,15 +43,17 @@ class RoformerSeparator:
         self._output_dir: Path | None = None
         self.notice = (
             "backend=roformer. Kimberley Jensen Mel-Band RoFormer bleedless "
-            f"({model_filename}) at {BED_RATE} Hz stereo. The bed is the original "
-            "mix minus the vocal estimate. Channels beyond the stereo pair stay as they were."
+            f"({model_filename}) at {BED_RATE} Hz stereo. Outside dubbed lines the "
+            "original mix is kept. Under each line the bed is that mix minus the "
+            "vocal estimate. Channels beyond the stereo pair stay as they were. "
+            "Sounds that overlap speech can still be lost with the vocal estimate."
         )
 
     def separate(self, audio: Path, work_dir: Path) -> tuple[Path, Path]:
         work_dir.mkdir(parents=True, exist_ok=True)
         mix, sample_rate = load_audio(audio)
         mix = _at_bed_rate(mix, sample_rate)
-        pair, extra = _stereo_pair(mix)
+        pair, _extra = _stereo_pair(mix)
         pair_path = work_dir / "stereo_pair.wav"
         write_audio(pair_path, pair, BED_RATE)
         separator = self._load(work_dir)
@@ -76,13 +77,9 @@ class RoformerSeparator:
             )
         vocals, vocal_rate = load_audio(vocal_path)
         vocals = _at_bed_rate(vocals, vocal_rate)
-        bed_pair = stereo_bed(pair, vocals)
-        bed = bed_pair if extra is None else np.concatenate([bed_pair, extra], axis=1)
-        background = work_dir / "background.wav"
-        write_audio(background, bed, BED_RATE)
         kept_vocals = work_dir / "vocals.wav"
         write_audio(kept_vocals, pad_trim_2d(_as_stereo(vocals), pair.shape[0]), BED_RATE)
-        return kept_vocals, background
+        return kept_vocals, audio
 
     def _load(self, work_dir: Path):
         if self._separator is not None and self._output_dir == work_dir:
