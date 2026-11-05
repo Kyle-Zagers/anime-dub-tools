@@ -86,6 +86,7 @@ def test_cli_srt_and_video_mux(tmp_path: Path):
     assert "actor=-" in result.stdout
     assert has_video_stream(out)
     assert "audio" in stream_types(out)
+    assert "MuseTalk" not in result.stdout
     mixed = load_mono(out, DIALOGUE_RATE)
     assert float(np.sqrt(np.mean(mixed**2))) > 0.01
 
@@ -109,13 +110,20 @@ def test_missing_episode_is_an_error(tmp_path: Path):
     assert "Episode not found" in result.stderr
 
 
-def _run(episode: Path, subs: Path, out: Path, work: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    episode: Path,
+    subs: Path,
+    out: Path,
+    work: Path,
+    extra: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("HUGGINGFACE_API_KEY", None)
     env.pop("HF_TOKEN", None)
     env.pop("HUGGING_FACE_HUB_TOKEN", None)
     env.pop("INDEXTTS_MODEL_DIR", None)
     env.pop("OPENVOICE_DIR", None)
+    env.pop("MUSETALK_MODEL_DIR", None)
     return subprocess.run(
         [
             sys.executable,
@@ -135,6 +143,7 @@ def _run(episode: Path, subs: Path, out: Path, work: Path) -> subprocess.Complet
             "reference",
             "--keep-work",
             str(work),
+            *(extra or []),
         ],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,

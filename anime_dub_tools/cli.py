@@ -35,6 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hf-token", default=None, help="Hugging Face token. Prefer the environment.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--keep-work", type=Path, default=None, help="Keep intermediate wavs in this directory.")
+    parser.add_argument(
+        "--lips",
+        action="store_true",
+        help="Patch mouths with MuseTalk when one face passes the gate. Off by default.",
+    )
+    parser.add_argument("--lips-model-dir", type=Path, default=_env_path("MUSETALK_MODEL_DIR"))
     args = parser.parse_args(argv)
     try:
         separator = build_separator(args.separator, args.separator_model)
@@ -50,26 +56,29 @@ def main(argv: list[str] | None = None) -> int:
             args.openvoice_dir,
             _device(args.device, neural=_needs_torch(args)),
         )
+        dub_kwargs = {
+            "separator": separator,
+            "diarizer": diarizer,
+            "synthesizer": synthesizer,
+            "lips": args.lips,
+            "lips_model_dir": args.lips_model_dir,
+        }
         if args.keep_work is None:
             with tempfile.TemporaryDirectory(prefix="anime-dub-") as temporary:
                 dub_episode(
                     args.episode,
                     args.subs,
                     args.out,
-                    separator=separator,
-                    diarizer=diarizer,
-                    synthesizer=synthesizer,
                     work_dir=Path(temporary),
+                    **dub_kwargs,
                 )
         else:
             dub_episode(
                 args.episode,
                 args.subs,
                 args.out,
-                separator=separator,
-                diarizer=diarizer,
-                synthesizer=synthesizer,
                 work_dir=args.keep_work,
+                **dub_kwargs,
             )
     except DubError as exc:
         print(f"error: {exc}", file=sys.stderr)

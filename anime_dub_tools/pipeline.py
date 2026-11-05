@@ -39,6 +39,8 @@ def dub_episode(
     diarizer,
     synthesizer,
     work_dir: Path,
+    lips: bool = False,
+    lips_model_dir: Path | None = None,
 ) -> None:
     require_ffmpeg()
     if not episode.is_file():
@@ -72,7 +74,7 @@ def dub_episode(
     references = _write_references(work_dir, vocal_audio, assigned, turns)
     print(f"[tts] {synthesizer.label}", flush=True)
     _emit_notice(synthesizer)
-    rendered: list[tuple[Path, float]] = []
+    rendered: list[tuple[Path, float, float]] = []
     for number, item in enumerate(assigned, start=1):
         start, end = _clamp(item, duration)
         if end - start < 0.05:
@@ -93,15 +95,22 @@ def dub_episode(
             raise
         except Exception as exc:
             raise DubError(f"TTS failed on line {item.cue.index} ({item.speaker}): {exc}") from exc
-        rendered.append((destination, start))
+        rendered.append((destination, start, end))
 
     if not rendered:
         raise DubError("Every subtitle line was skipped, so there is nothing to mix.")
     mix_path = work_dir / "mix.wav"
-    print("[mix] dialogue onto background", flush=True)
-    mix_tracks(background, rendered, mix_path, duration)
+    print("[mix] dialogue onto stereo background", flush=True)
+    mix_tracks(background, [(path, start) for path, start, _end in rendered], mix_path, duration)
     print(f"[mux] {out}", flush=True)
-    mux(episode, mix_path, out)
+    mux(
+        episode,
+        mix_path,
+        out,
+        lips=lips,
+        lips_model_dir=lips_model_dir,
+        spoken_spans=[(start, end) for _path, start, end in rendered],
+    )
     print(f"wrote {out}", flush=True)
 
 
