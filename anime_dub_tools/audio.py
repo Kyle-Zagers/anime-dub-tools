@@ -10,6 +10,7 @@ from anime_dub_tools.models import DubError
 
 DIALOGUE_RATE = 22050
 BED_RATE = 44100
+LINE_FADE_SECONDS = 0.010
 
 
 def require_ffmpeg() -> None:
@@ -153,6 +154,11 @@ def write_wav(path: Path, samples: np.ndarray, sample_rate: int = DIALOGUE_RATE)
 
 def load_audio(path: Path) -> tuple[np.ndarray, int]:
     """Return float audio as (samples, channels) at the file's own rate."""
+    pcm, sample_rate = _load_pcm(path)
+    return pcm.astype(np.float32) / 32768.0, sample_rate
+
+
+def _load_pcm(path: Path) -> tuple[np.ndarray, int]:
     sample_rate, channels = probe_audio(path)
     result = subprocess.run(
         [
@@ -181,9 +187,9 @@ def load_audio(path: Path) -> tuple[np.ndarray, int]:
     if width and len(raw) % width:
         raw = raw[: len(raw) - (len(raw) % width)]
     if not raw:
-        return np.zeros((0, channels), dtype=np.float32), sample_rate
-    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, channels)
-    return pcm / 32768.0, sample_rate
+        return np.zeros((0, channels), dtype="<i2"), sample_rate
+    pcm = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).copy()
+    return pcm, sample_rate
 
 
 def write_audio(path: Path, samples: np.ndarray, sample_rate: int) -> None:
@@ -393,42 +399,137 @@ def normalize_peak(samples: np.ndarray, peak: float = 0.9) -> np.ndarray:
     return samples * (peak / current)
 
 
+def line_fade_gain(length: int, sample_rate: int) -> np.ndarray:
+    """Rise and fall inside one line. About 10 ms, never past the line edges."""
+    gain = np.ones(length, dtype=np.float32)
+    if length <= 0:
+        return gain
+    fade = int(round(LINE_FADE_SECONDS * sample_rate))
+    fade = min(fade, length // 2)
+    if fade <= 0:
+        return gain
+    gain[:fade] = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    gain[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    return gain
+
+
 def mix_tracks(
     background: Path,
-    lines: list[tuple[Path, float]],
+    lines: list[tuple[Path, float] | tuple[Path, float, float]],
     destination: Path,
     duration: float,
+    vocals: Path | None = None,
 ) -> None:
-    """Add dialogue to the stereo pair at unity gain.
+    """Keep the original mix outside each dubbed line.
 
-    The bed is not ducked and not folded to mono. Channels beyond stereo
-    are left untouched. A final scale runs only when the sum would clip.
+    Inside a line, fade onto the mix-minus-vocals bed and add the English
+    dialogue. The fade is about 10 ms and stays inside the line. Channels
+    past the stereo pair are copied through. Sounds that overlap speech can
+    still be removed with the vocal estimate. Without a separate vocal file,
+    the original mix stays under the new line.
     """
-    bed, sample_rate = load_audio(background)
-    count = max(1, int(round(duration * sample_rate)))
-    mix = pad_trim_2d(bed, count)
-    for path, start in lines:
-        line, line_rate = load_audio(path)
-        mono = line.mean(axis=1) if line.shape[1] > 1 else line[:, 0]
+    original_pcm, sample_rate = _load_pcm(background)
+    count = max(1, int(round(float(duration) * sample_rate)))
+    original_pcm = _pad_trim_pcm(original_pcm, count)
+    output_pcm = original_pcm.copy()
+    original = original_pcm.astype(np.float32) / 32768.0
+    pair = min(2, original.shape[1])
+    estimate = None
+    if vocals is not None and Path(vocals).resolve() != Path(background).resolve():
+        estimate = _vocal_estimate(vocals, sample_rate, count, pair)
+    removal = np.zeros(count, dtype=np.float32)
+    added = np.zeros((count, pair), dtype=np.float32)
+    for item in lines:
+        path, start, end = _parse_line(item)
+        mono, line_rate = _line_mono(path)
         if line_rate != sample_rate and len(mono):
             mono = resample_linear(mono, max(1, int(round(len(mono) * sample_rate / line_rate))))
-        index = int(round(start * sample_rate))
-        if index >= count:
+        start_i = int(round(start * sample_rate))
+        if start_i < 0:
+            mono = mono[-start_i:]
+            start_i = 0
+        end_i = start_i + len(mono) if end is None else int(round(end * sample_rate))
+        end_i = min(count, end_i)
+        if start_i >= end_i or start_i >= count:
             continue
-        if index < 0:
-            mono = mono[-index:]
-            index = 0
-        stop = min(count, index + len(mono))
-        segment = mono[: stop - index]
-        if mix.shape[1] == 1:
-            mix[index:stop, 0] += segment
-        else:
-            mix[index:stop, 0] += segment
-            mix[index:stop, 1] += segment
-    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
-    if peak > 0.98:
-        mix *= 0.98 / peak
-    write_audio(destination, mix, sample_rate)
+        length = end_i - start_i
+        gain = line_fade_gain(length, sample_rate)
+        dialogue = np.zeros(length, dtype=np.float32)
+        take = min(length, len(mono))
+        dialogue[:take] = mono[:take]
+        removal[start_i:end_i] = np.maximum(removal[start_i:end_i], gain)
+        added[start_i:end_i] += dialogue[:, None] * gain[:, None]
+    mask = removal > 0
+    if np.any(mask):
+        stereo = original[:, :pair]
+        mixed = stereo[mask]
+        if estimate is not None:
+            mixed = mixed - removal[mask, None] * estimate[mask]
+        mixed = mixed + added[mask]
+        output_pcm[mask, :pair] = _float_to_pcm(mixed)
+    _write_pcm(destination, output_pcm, sample_rate)
+
+
+def _parse_line(item: tuple[Path, float] | tuple[Path, float, float]) -> tuple[Path, float, float | None]:
+    if len(item) == 2:
+        path, start = item
+        return path, float(start), None
+    path, start, end = item
+    return path, float(start), float(end)
+
+
+def _line_mono(path: Path) -> tuple[np.ndarray, int]:
+    pcm, sample_rate = _load_pcm(path)
+    if pcm.size == 0:
+        return np.zeros(0, dtype=np.float32), sample_rate
+    audio = pcm.astype(np.float32) / 32768.0
+    mono = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
+    return mono, sample_rate
+
+
+def _vocal_estimate(path: Path, sample_rate: int, count: int, pair: int) -> np.ndarray:
+    pcm, vocal_rate = _load_pcm(path)
+    audio = pcm.astype(np.float32) / 32768.0
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if vocal_rate != sample_rate and len(audio):
+        target = max(1, int(round(len(audio) * sample_rate / vocal_rate)))
+        audio = np.stack([resample_linear(audio[:, channel], target) for channel in range(audio.shape[1])], axis=1)
+    audio = pad_trim_2d(audio, count)
+    if audio.shape[1] == 1 and pair == 2:
+        audio = np.repeat(audio, 2, axis=1)
+    return audio[:, :pair]
+
+
+def _pad_trim_pcm(pcm: np.ndarray, count: int) -> np.ndarray:
+    if count <= 0:
+        return np.zeros((0, pcm.shape[1]), dtype="<i2")
+    if pcm.shape[0] == count:
+        return pcm.copy()
+    if pcm.shape[0] > count:
+        return pcm[:count].copy()
+    out = np.zeros((count, pcm.shape[1]), dtype="<i2")
+    out[: pcm.shape[0]] = pcm
+    return out
+
+
+def _float_to_pcm(samples: np.ndarray) -> np.ndarray:
+    clipped = np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0)
+    return (clipped * 32767.0).astype("<i2")
+
+
+def _write_pcm(path: Path, pcm: np.ndarray, sample_rate: int) -> None:
+    import wave
+
+    audio = np.asarray(pcm, dtype="<i2")
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(audio.shape[1])
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(audio.tobytes())
 
 
 def mux(

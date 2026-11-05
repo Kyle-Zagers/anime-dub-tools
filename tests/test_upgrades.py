@@ -84,7 +84,7 @@ def test_extract_keeps_channels_past_stereo(tmp_path: Path):
     np.testing.assert_allclose(loaded[:, 3], -0.55, atol=0.01)
 
 
-def test_separator_builds_the_bed_from_the_mix_minus_vocals(tmp_path: Path):
+def test_separator_keeps_the_original_mix_and_returns_vocals(tmp_path: Path):
     source = tmp_path / "mix.wav"
     count = BED_RATE // 5
     mix = np.zeros((count, 4), dtype=np.float32)
@@ -106,15 +106,18 @@ def test_separator_builds_the_bed_from_the_mix_minus_vocals(tmp_path: Path):
 
     separator._load = lambda work_dir: _Fake()  # type: ignore[method-assign]
     vocals, background = separator.separate(source, tmp_path / "work")
-    bed, rate = load_audio(background)
+    assert background == source
+    assert not (tmp_path / "work" / "background.wav").exists()
+    kept, rate = load_audio(background)
     assert rate == BED_RATE
-    assert bed.shape[1] == 4
-    np.testing.assert_allclose(bed[:, 0], 0.3, atol=0.01)
-    np.testing.assert_allclose(bed[:, 1], -0.3, atol=0.01)
-    np.testing.assert_allclose(bed[:, 2], 0.8, atol=0.01)
-    np.testing.assert_allclose(bed[:, 3], 0.1, atol=0.01)
+    assert kept.shape[1] == 4
+    np.testing.assert_allclose(kept[:, 0], 0.5, atol=0.01)
+    np.testing.assert_allclose(kept[:, 1], -0.3, atol=0.01)
+    np.testing.assert_allclose(kept[:, 2], 0.8, atol=0.01)
+    np.testing.assert_allclose(kept[:, 3], 0.1, atol=0.01)
     vocal_audio, _ = load_audio(vocals)
     assert vocal_audio.shape[1] == 2
+    np.testing.assert_allclose(vocal_audio[:, 0], 0.2, atol=0.01)
     assert "instrumental" not in background.name
 
 
@@ -133,6 +136,50 @@ def test_missing_vocal_estimate_is_not_replaced_by_an_instrumental(tmp_path: Pat
     separator._load = lambda work_dir: _Fake()  # type: ignore[method-assign]
     with pytest.raises(DubError, match="instrumental"):
         separator.separate(source, tmp_path / "work")
+
+
+def test_line_bed_keeps_the_marker_and_mixes_inside_the_cue(tmp_path: Path):
+    original = tmp_path / "original.wav"
+    vocal_path = tmp_path / "vocals.wav"
+    line = tmp_path / "line.wav"
+    out = tmp_path / "mix.wav"
+    count = BED_RATE
+    mix = np.zeros((count, 3), dtype=np.float32)
+    vocals = np.zeros((count, 2), dtype=np.float32)
+    start = int(0.20 * BED_RATE)
+    end = int(0.40 * BED_RATE)
+    marker = slice(int(0.05 * BED_RATE), int(0.12 * BED_RATE))
+    mix[:, 0] = 0.25
+    mix[:, 1] = -0.40
+    mix[:, 2] = 0.15
+    vocals[:, 0] = 0.30
+    vocals[:, 1] = 0.10
+    mix[start:end, 0] = 0.50
+    mix[start:end, 1] = 0.10
+    vocals[start:end, 0] = 0.20
+    vocals[start:end, 1] = -0.05
+    dialogue = np.full(end - start, 0.08, dtype=np.float32)
+    write_audio(original, mix, BED_RATE)
+    write_audio(vocal_path, vocals, BED_RATE)
+    write_wav(line, dialogue, BED_RATE)
+    mix_tracks(original, [(line, 0.20, 0.40)], out, 1.0, vocals=vocal_path)
+    mixed, rate = load_audio(out)
+    source, _ = load_audio(original)
+    assert rate == BED_RATE
+    assert mixed.shape == source.shape
+    assert np.array_equal(mixed[marker], source[marker])
+    assert np.array_equal(mixed[start - 1], source[start - 1])
+    assert np.array_equal(mixed[end], source[end])
+    assert np.array_equal(mixed[:, 2], source[:, 2])
+    interior = slice(start + int(0.020 * BED_RATE), end - int(0.020 * BED_RATE))
+    expected_left = 0.50 - 0.20 + 0.08
+    expected_right = 0.10 - (-0.05) + 0.08
+    np.testing.assert_allclose(mixed[interior, 0], expected_left, atol=0.001)
+    np.testing.assert_allclose(mixed[interior, 1], expected_right, atol=0.001)
+    assert not np.allclose(mixed[marker, 0], source[marker, 0] - 0.30)
+    edge = mixed[start + int(0.005 * BED_RATE)]
+    assert abs(float(edge[0]) - expected_left) > 0.01
+    assert abs(float(edge[0]) - float(source[start + int(0.005 * BED_RATE), 0])) > 0.01
 
 
 def test_mix_does_not_duck_or_fold_the_bed(tmp_path: Path):
