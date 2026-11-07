@@ -88,25 +88,13 @@ def emotion_interval(cue: Cue, turns: list[Turn]) -> tuple[float, float]:
 
 
 def fit_window(cue: Cue, turns: list[Turn]) -> tuple[float, float]:
-    """Place a line on the subtitle cue, or on the vocal span inside that cue."""
-    best: Turn | None = None
-    best_overlap = 0.0
-    for turn in turns:
-        covered = overlap(cue.start, cue.end, turn.start, turn.end)
-        if covered > best_overlap:
-            best = turn
-            best_overlap = covered
-    cue_duration = max(0.0, cue.end - cue.start)
-    if best is not None and cue_duration > 0:
-        shorter = min(cue_duration, best.end - best.start)
-        if best_overlap >= 0.5 * shorter and best_overlap >= 0.12:
-            start = max(cue.start, best.start)
-            end = min(cue.end, best.end)
-            if end - start >= 0.12:
-                return start, end
-    if cue_duration < 0.12:
-        return cue.start, cue.start + 0.12
-    return cue.start, cue.end
+    """Place a line on the subtitle cue.
+
+    A short diarized blip inside a longer cue is not the window. Using that
+    blip starts the line late and then crushes the sentence into the tail.
+    """
+    del turns
+    return cue.start, max(cue.start, cue.end)
 
 
 def _speaker_for_cue(cue: Cue, turns: list[Turn]) -> str:

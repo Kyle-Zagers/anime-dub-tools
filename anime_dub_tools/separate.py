@@ -16,8 +16,8 @@ from anime_dub_tools.models import DubError
 
 # Kimberley Jensen Mel-Band RoFormer, unwa FT2 bleedless checkpoint.
 # The fullness-tuned forks (FT2 without "bleedless", and the Gabox fullness
-# instrumentals) are not the default. The vocal estimate is removed only under
-# dubbed lines, not across the whole file, and it is not an instrumental stem.
+# instrumentals) are not the default. The vocal estimate is subtracted from
+# the whole episode in the mix, and it is not an instrumental stem.
 DEFAULT_SEPARATOR_MODEL = "mel_band_roformer_kim_ft2_bleedless_unwa.ckpt"
 
 
@@ -37,15 +37,15 @@ class CopySeparator:
 class RoformerSeparator:
     name = "roformer"
 
-    def __init__(self, model_filename: str) -> None:
+    def __init__(self, model_filename: str, device: str = "cpu") -> None:
         self.model_filename = model_filename
+        self.device = device
         self._separator = None
         self._output_dir: Path | None = None
         self.notice = (
             "backend=roformer. Kimberley Jensen Mel-Band RoFormer bleedless "
-            f"({model_filename}) at {BED_RATE} Hz stereo. Outside dubbed lines the "
-            "original mix is kept. Under each line the bed is that mix minus the "
-            "vocal estimate. Channels beyond the stereo pair stay as they were. "
+            f"({model_filename}) at {BED_RATE} Hz. The vocal estimate is removed "
+            "from the whole episode, and the bed written out is stereo. "
             "Sounds that overlap speech can still be lost with the vocal estimate."
         )
 
@@ -88,6 +88,7 @@ class RoformerSeparator:
             from audio_separator.separator import Separator
         except ImportError as exc:
             raise DubError(_separator_install_message()) from exc
+        use_directml = self.device.startswith("privateuseone") or self.device == "directml"
         separator = Separator(
             log_level=logging.WARNING,
             output_dir=str(work_dir),
@@ -95,7 +96,12 @@ class RoformerSeparator:
             sample_rate=BED_RATE,
             output_single_stem="Vocals",
             use_soundfile=True,
+            use_directml=use_directml,
         )
+        if self.device.startswith("cuda") or self.device.startswith("privateuseone"):
+            import torch
+
+            separator.torch_device = torch.device(self.device)
         try:
             separator.load_model(model_filename=self.model_filename)
         except DubError:
@@ -133,7 +139,7 @@ def separator_available() -> bool:
     return True
 
 
-def build_separator(name: str, model: str | None):
+def build_separator(name: str, model: str | None, device: str = "cpu"):
     chosen = name
     if name == "auto":
         chosen = "roformer" if separator_available() else "missing"
@@ -142,7 +148,7 @@ def build_separator(name: str, model: str | None):
     if chosen == "roformer":
         if not separator_available():
             raise DubError(_separator_install_message())
-        return RoformerSeparator(model or DEFAULT_SEPARATOR_MODEL)
+        return RoformerSeparator(model or DEFAULT_SEPARATOR_MODEL, device)
     if chosen == "missing":
         raise DubError(_separator_install_message())
     raise DubError(f"Unknown separator {name!r}. Use auto, roformer, or copy.")

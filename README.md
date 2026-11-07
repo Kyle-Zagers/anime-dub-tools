@@ -71,9 +71,9 @@ python -m anime_dub_tools \
   --tts-model-dir "$INDEXTTS_MODEL_DIR"
 ```
 
-IndexTTS-2.5 is the voice backend to use for a real dub. The speaker reference is only the timbre prompt (`spk_audio_prompt`). Emotion is one style for the whole line, taken from that line's isolated source audio (`emo_audio_prompt`). Extreme takes raise `emo_alpha`. This is not a pitch-contour copy, and the text emotion model stays off. `duration_factor` stays between 0.5 and 2.0, then ffmpeg `atempo` finishes the fit.
+IndexTTS-2.5 is the voice backend to use for a real dub. The speaker reference is only the timbre prompt (`spk_audio_prompt`). Emotion is one style for the whole line, taken from that line's isolated source audio (`emo_audio_prompt`). Extreme takes raise `emo_alpha`. This is not a pitch-contour copy, and the text emotion model stays off. `duration_factor` stays between 0.5 and 2.0. ffmpeg `atempo` stays in that same range, then the line is padded or trimmed so it occupies the subtitle cue.
 
-The vocal model is the Kimberley Jensen Mel-Band RoFormer bleedless checkpoint, `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt`, at 44.1 kHz stereo. Outside each dubbed line the original mix is kept sample for sample, including any channels past stereo. Inside the line, the English dialogue is mixed over the original minus the vocal estimate. A fade of about 10 ms stays inside the line boundaries. Sounds that overlap the speech can still be removed with that vocal estimate. The bed is not the model's instrumental stem, and it is not ducked. A mono source is given a stereo pair for that subtraction. Pass `--separator-model` to try another checkpoint; a fullness-tuned fork is not the default.
+The vocal model is the Kimberley Jensen Mel-Band RoFormer bleedless checkpoint, `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt`, at 44.1 kHz. The vocal estimate is removed from the whole episode. The bed written out is stereo: the original pair minus that estimate. Channels past stereo are dropped, so source dialogue is not left on another output channel. English is added inside each cue. A fade of about 10 ms stays inside the line boundaries. Sounds that overlap the speech can still be removed with that vocal estimate. The bed is not the model's instrumental stem, and it is not ducked. A mono source is given a stereo pair for that subtraction. Pass `--separator-model` to try another checkpoint; a fullness-tuned fork is not the default.
 
 OpenVoice V2 is the swappable MIT-licensed cloner. It copies tone color from the episode and gets English rhythm from MeloTTS, then the same time-fit runs. It does not follow the original performance as closely.
 
@@ -111,8 +111,8 @@ If `auto` cannot import audio-separator, the command stops and tells you how to 
 | Diarization | pyannote community-1 is implemented and swappable. Without a token, a NumPy spectral clusterer runs instead. It is a real clusterer, not production diarization. |
 | Reference TTS | Implemented. espeak-ng speaks the line; pitch and loudness come from the speaker's audio and from that line. Harmonic fallback if espeak-ng is missing. |
 | IndexTTS and OpenVoice | Implemented against their current Python calls. They are not executed in tests. Weights are not downloaded here. |
-| Time-fit | Implemented with ffmpeg `atempo`, then a sample-accurate trim or pad onto the cue, or onto the vocal span inside that cue. IndexTTS `duration_factor` is clamped to 0.5–2.0 before that. |
-| Mix and mux | Implemented. Outside dialogue the original mix is copied. Inside each line the dubbed dialogue sits on the mix-minus-vocals bed, with a short fade inside the cue. Extra channels stay untouched. Video inputs keep their picture when the output is a video container. |
+| Time-fit | Implemented. The line occupies the subtitle cue. A short vocal blip inside a longer cue does not shrink it. ffmpeg `atempo` is clamped to 0.5–2.0, then the result is trimmed or padded. IndexTTS `duration_factor` is clamped to 0.5–2.0 before that. |
+| Mix and mux | Implemented. With a vocal estimate, the whole episode is a stereo bed (original pair minus that estimate) and channels past stereo are dropped. English is added inside each cue with a short fade. Without a vocal estimate, the original mix is kept. Video inputs keep their picture when the output is a video container. |
 | Lips | Off unless `--lips` is set. With MuseTalk weights, a mouth is patched only when one face is large, near-frontal, uncovered, and that face is the speaker. Every other frame, including off-screen lines, is copied. Missing weights copy the picture and say so. |
 
 Signs, songs, and on-screen text are dubbed if they are dialogue lines in the subtitle file. Delete those cues first if you do not want them spoken.
@@ -169,14 +169,14 @@ Any other episode uses the same command. The show title is not part of the tool.
 | Flag | Default | Role |
 | --- | --- | --- |
 | `--separator` | `auto` | `roformer` when audio-separator is installed, otherwise an error. `copy` keeps the original mix. |
-| `--separator-model` | `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt` | Kimberley Jensen Mel-Band RoFormer bleedless checkpoint at 44.1 kHz. The vocal estimate is removed only under dubbed lines. |
+| `--separator-model` | `mel_band_roformer_kim_ft2_bleedless_unwa.ckpt` | Kimberley Jensen Mel-Band RoFormer bleedless checkpoint at 44.1 kHz. The vocal estimate is removed from the whole episode, and the bed is stereo. |
 | `--diarizer` | `auto` | pyannote when the token and package are both present, otherwise spectral. |
 | `--diarizer-model` | `pyannote/speaker-diarization-community-1` | Gated Hugging Face pipeline id. |
 | `--tts` | `auto` | IndexTTS if `config.yaml` is in the model dir, else OpenVoice if its converter checkpoint is present, else reference. |
 | `--tts-model-dir` | `INDEXTTS_MODEL_DIR` | IndexTTS checkpoint directory. |
 | `--openvoice-dir` | `OPENVOICE_DIR` | OpenVoice V2 `checkpoints_v2` directory. |
 | `--hf-token` | `HUGGINGFACE_API_KEY` or `HF_TOKEN` | Not printed. Do not commit it. |
-| `--device` | `auto` | `cpu` or `cuda`. CUDA is used only by the neural backends. |
+| `--device` | `auto` | `cpu`, or the largest GPU PyTorch can see. Neural separation, diarization, and TTS use that device. An integrated GPU is not chosen when a larger one is present. |
 | `--keep-work` | temporary directory | Leave extracted audio, references, and line wavs on disk. |
 | `--lips` | off | Patch mouths with MuseTalk when one face passes the gate. Otherwise copy the frame. |
 | `--lips-model-dir` | `MUSETALK_MODEL_DIR` | MuseTalk weights. Used only with `--lips`. Missing weights copy the picture. |

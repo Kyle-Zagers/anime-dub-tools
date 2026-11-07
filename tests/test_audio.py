@@ -14,6 +14,36 @@ from anime_dub_tools.audio import (
 )
 
 
+def test_fit_duration_keeps_a_normal_line_in_the_body(tmp_path: Path):
+    source = tmp_path / "source.wav"
+    count = int(1.2 * DIALOGUE_RATE)
+    time = np.arange(count, dtype=np.float32) / DIALOGUE_RATE
+    write_wav(source, 0.4 * np.sin(2 * np.pi * 220 * time), DIALOGUE_RATE)
+    destination = tmp_path / "fit.wav"
+    fit_duration(source, destination, 1.5, DIALOGUE_RATE)
+    audio = load_mono(destination, DIALOGUE_RATE)
+    assert abs(len(audio) / DIALOGUE_RATE - 1.5) < 0.02
+    body = audio[: int(1.0 * DIALOGUE_RATE)]
+    assert float(np.sqrt(np.mean(body**2))) > 0.05
+    assert float(np.max(np.abs(audio[: int(0.2 * DIALOGUE_RATE)]))) > 0.05
+
+
+def test_ordinary_line_is_not_sped_into_a_tenth_of_a_second(tmp_path: Path):
+    source = tmp_path / "source.wav"
+    count = DIALOGUE_RATE
+    time = np.arange(count, dtype=np.float32) / DIALOGUE_RATE
+    write_wav(source, 0.4 * np.sin(2 * np.pi * 220 * time), DIALOGUE_RATE)
+    destination = tmp_path / "crushed.wav"
+    fit_duration(source, destination, 0.12, DIALOGUE_RATE)
+    audio = load_mono(destination, DIALOGUE_RATE)
+    assert abs(len(audio) / DIALOGUE_RATE - 0.12) < 0.02
+    window = audio * np.hanning(len(audio))
+    spectrum = np.abs(np.fft.rfft(window))
+    freqs = np.fft.rfftfreq(len(audio), d=1.0 / DIALOGUE_RATE)
+    peak = float(freqs[1 + int(np.argmax(spectrum[1:]))])
+    assert peak < 600
+
+
 def test_duration_fit_hits_shorter_and_longer_targets(tmp_path: Path):
     source = tmp_path / "source.wav"
     count = DIALOGUE_RATE

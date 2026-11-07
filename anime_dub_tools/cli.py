@@ -14,6 +14,7 @@ from anime_dub_tools.synthesize import build_synthesizer
 
 
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdio()
     parser = argparse.ArgumentParser(
         prog="anime_dub_tools",
         description=(
@@ -43,18 +44,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lips-model-dir", type=Path, default=_env_path("MUSETALK_MODEL_DIR"))
     args = parser.parse_args(argv)
     try:
-        separator = build_separator(args.separator, args.separator_model)
+        device = _device(args.device, neural=_needs_torch(args))
+        separator = build_separator(args.separator, args.separator_model, device)
         diarizer = build_diarizer(
             args.diarizer,
             _token(args.hf_token),
             args.diarizer_model,
-            _device(args.device, neural=_needs_torch(args)),
+            device,
         )
         synthesizer = build_synthesizer(
             args.tts,
             args.tts_model_dir,
             args.openvoice_dir,
-            _device(args.device, neural=_needs_torch(args)),
+            device,
         )
         dub_kwargs = {
             "separator": separator,
@@ -84,6 +86,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 
 def _token(explicit: str | None) -> str | None:
@@ -130,9 +143,29 @@ def _device(preference: str, neural: bool) -> str:
         return "cpu"
     if preference == "cuda" and not torch.cuda.is_available():
         raise DubError("CUDA was requested but no GPU is visible to PyTorch.")
-    if torch.cuda.is_available():
-        return "cuda:0"
+    if torch.cuda.is_available() and preference in {"auto", "cuda"}:
+        index = _largest_cuda_index()
+        torch.cuda.set_device(index)
+        return f"cuda:{index}"
     return "cpu"
+
+
+def _largest_cuda_index() -> int:
+    """Prefer the GPU with the most memory.
+
+    A machine with an integrated GPU and a discrete card enumerates both.
+    The smaller device is often index 0.
+    """
+    import torch
+
+    best = 0
+    best_mem = -1
+    for index in range(torch.cuda.device_count()):
+        memory = int(torch.cuda.get_device_properties(index).total_memory)
+        if memory > best_mem:
+            best = index
+            best_mem = memory
+    return best
 
 
 if __name__ == "__main__":

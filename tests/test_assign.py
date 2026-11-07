@@ -40,12 +40,20 @@ def test_unnamed_lines_follow_diarized_speakers():
     assert speaker_rows(assigned)[0].actor is None
 
 
-def test_fit_window_uses_the_vocal_span_inside_the_cue():
+def test_fit_window_keeps_the_subtitle_cue():
     cue = Cue(1, 0.0, 2.0, "A long caption.", None)
     turns = [Turn(0.40, 1.10, "SPEAKER_00")]
     start, end = fit_window(cue, turns)
-    assert start == 0.40
-    assert end == 1.10
+    assert start == 0.0
+    assert end == 2.0
+
+
+def test_fit_window_does_not_crush_a_line_into_a_short_voiced_tail():
+    cue = Cue(1, 10.0, 12.5, "A sentence that should fill the cue.", None)
+    turns = [Turn(12.30, 12.48, "SPEAKER_00")]
+    start, end = fit_window(cue, turns)
+    assert (start, end) == (10.0, 12.5)
+    assert end - start > 1.0
 
 
 def test_unnamed_line_without_overlap_uses_the_nearest_speaker():

@@ -224,24 +224,28 @@ def pad_trim_2d(samples: np.ndarray, count: int) -> np.ndarray:
 
 
 def stereo_bed(mix: np.ndarray, vocals: np.ndarray) -> np.ndarray:
-    """Original mix minus the vocal estimate on the stereo pair only.
+    """Stereo mix minus the vocal estimate.
 
-    Channels after the first two are copied unchanged. This is not a
-    dialogue/music/effects stem and it is not a mono downmix.
+    A mono source is duplicated. Channels after the stereo pair are dropped
+    so a surround track cannot keep the original dialogue. This is not the
+    separator's instrumental stem and it is not a mono downmix.
     """
     bed = np.asarray(mix, dtype=np.float32)
+    if bed.ndim == 1:
+        bed = bed[:, None]
     if bed.ndim != 2 or bed.shape[1] < 1:
         raise DubError("The background mix must be a (samples, channels) array.")
+    if bed.shape[1] == 1:
+        bed = np.repeat(bed, 2, axis=1)
+    else:
+        bed = bed[:, :2].copy()
     estimate = np.asarray(vocals, dtype=np.float32)
     if estimate.ndim == 1:
         estimate = estimate[:, None]
-    pair_count = min(2, bed.shape[1])
-    if estimate.shape[1] == 1 and pair_count == 2:
+    if estimate.shape[1] == 1:
         estimate = np.repeat(estimate, 2, axis=1)
-    estimate = pad_trim_2d(estimate[:, :pair_count], bed.shape[0])
-    output = bed.copy()
-    output[:, :pair_count] = bed[:, :pair_count] - estimate
-    return output
+    estimate = pad_trim_2d(estimate[:, :2], bed.shape[0])
+    return bed - estimate
 
 
 def pad_trim(samples: np.ndarray, count: int) -> np.ndarray:
@@ -271,16 +275,13 @@ def resample_linear(samples: np.ndarray, count: int) -> np.ndarray:
 
 
 def atempo_filter(speed: float) -> str:
-    speed = float(np.clip(speed, 0.05, 20.0))
-    parts: list[str] = []
-    while speed > 2.0:
-        parts.append("atempo=2.0")
-        speed /= 2.0
-    while speed < 0.5:
-        parts.append("atempo=0.5")
-        speed /= 0.5
-    parts.append(f"atempo={speed:.5f}")
-    return ",".join(parts)
+    """One atempo stage, limited to 0.5–2.0.
+
+    A longer cue is padded and a shorter cue is trimmed. Ordinary lines are
+    not chained through extreme ratios into a tenth of a second.
+    """
+    speed = float(np.clip(speed, 0.5, 2.0))
+    return f"atempo={speed:.5f}"
 
 
 def fit_duration(source: Path, destination: Path, duration: float, sample_rate: int = DIALOGUE_RATE) -> None:
@@ -420,25 +421,26 @@ def mix_tracks(
     duration: float,
     vocals: Path | None = None,
 ) -> None:
-    """Keep the original mix outside each dubbed line.
+    """Mix English onto the episode bed.
 
-    Inside a line, fade onto the mix-minus-vocals bed and add the English
-    dialogue. The fade is about 10 ms and stays inside the line. Channels
-    past the stereo pair are copied through. Sounds that overlap speech can
-    still be removed with the vocal estimate. Without a separate vocal file,
-    the original mix stays under the new line.
+    With a vocal estimate, the whole episode becomes stereo: the original
+    pair minus that estimate, and channels past stereo are dropped so no
+    output channel still carries the source dialogue. English is added inside
+    each cue with a fade of about 10 ms. Overlap under a shout can still leak
+    a little. Without a separate vocal file, the original mix stays and the
+    new line is added on the stereo pair.
     """
     original_pcm, sample_rate = _load_pcm(background)
     count = max(1, int(round(float(duration) * sample_rate)))
     original_pcm = _pad_trim_pcm(original_pcm, count)
-    output_pcm = original_pcm.copy()
     original = original_pcm.astype(np.float32) / 32768.0
-    pair = min(2, original.shape[1])
-    estimate = None
-    if vocals is not None and Path(vocals).resolve() != Path(background).resolve():
-        estimate = _vocal_estimate(vocals, sample_rate, count, pair)
-    removal = np.zeros(count, dtype=np.float32)
-    added = np.zeros((count, pair), dtype=np.float32)
+    have_vocals = vocals is not None and Path(vocals).resolve() != Path(background).resolve()
+    if have_vocals:
+        estimate = _vocal_estimate(vocals, sample_rate, count, min(2, original.shape[1]))
+        output = stereo_bed(original, estimate)
+    else:
+        output = original.copy()
+    pair = min(2, output.shape[1])
     for item in lines:
         path, start, end = _parse_line(item)
         mono, line_rate = _line_mono(path)
@@ -457,17 +459,9 @@ def mix_tracks(
         dialogue = np.zeros(length, dtype=np.float32)
         take = min(length, len(mono))
         dialogue[:take] = mono[:take]
-        removal[start_i:end_i] = np.maximum(removal[start_i:end_i], gain)
-        added[start_i:end_i] += dialogue[:, None] * gain[:, None]
-    mask = removal > 0
-    if np.any(mask):
-        stereo = original[:, :pair]
-        mixed = stereo[mask]
-        if estimate is not None:
-            mixed = mixed - removal[mask, None] * estimate[mask]
-        mixed = mixed + added[mask]
-        output_pcm[mask, :pair] = _float_to_pcm(mixed)
-    _write_pcm(destination, output_pcm, sample_rate)
+        output[start_i:end_i, :pair] += dialogue[:, None] * gain[:, None]
+    written = output[:, :2] if have_vocals else output
+    _write_pcm(destination, _float_to_pcm(written), sample_rate)
 
 
 def _parse_line(item: tuple[Path, float] | tuple[Path, float, float]) -> tuple[Path, float, float | None]:
