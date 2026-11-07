@@ -45,7 +45,7 @@ def test_default_checkpoint_is_the_bleedless_roformer():
     assert "fullness" not in DEFAULT_SEPARATOR_MODEL
 
 
-def test_stereo_bed_subtracts_only_the_stereo_pair():
+def test_stereo_bed_is_stereo_and_drops_channels_past_the_pair():
     mix = np.zeros((8, 4), dtype=np.float32)
     mix[:, 0] = 0.5
     mix[:, 1] = -0.25
@@ -53,11 +53,9 @@ def test_stereo_bed_subtracts_only_the_stereo_pair():
     mix[:, 3] = -0.4
     vocals = np.array([[0.2, -0.1]] * 8, dtype=np.float32)
     bed = stereo_bed(mix, vocals)
-    assert bed.shape == (8, 4)
+    assert bed.shape == (8, 2)
     np.testing.assert_allclose(bed[:, 0], 0.3)
     np.testing.assert_allclose(bed[:, 1], -0.15)
-    np.testing.assert_allclose(bed[:, 2], 0.7)
-    np.testing.assert_allclose(bed[:, 3], -0.4)
     assert not np.allclose(bed[:, 0], bed[:, 1])
 
 
@@ -166,17 +164,20 @@ def test_line_bed_keeps_the_marker_and_mixes_inside_the_cue(tmp_path: Path):
     mixed, rate = load_audio(out)
     source, _ = load_audio(original)
     assert rate == BED_RATE
-    assert mixed.shape == source.shape
-    assert np.array_equal(mixed[marker], source[marker])
-    assert np.array_equal(mixed[start - 1], source[start - 1])
-    assert np.array_equal(mixed[end], source[end])
-    assert np.array_equal(mixed[:, 2], source[:, 2])
+    assert mixed.shape == (count, 2)
+    assert mixed.shape[1] == 2
+    bed_left = 0.25 - 0.30
+    bed_right = -0.40 - 0.10
+    np.testing.assert_allclose(mixed[marker, 0], bed_left, atol=0.001)
+    np.testing.assert_allclose(mixed[marker, 1], bed_right, atol=0.001)
+    assert not np.allclose(mixed[marker, 0], source[marker, 0])
+    np.testing.assert_allclose(mixed[start - 1, 0], bed_left, atol=0.001)
+    np.testing.assert_allclose(mixed[end, 0], bed_left, atol=0.001)
     interior = slice(start + int(0.020 * BED_RATE), end - int(0.020 * BED_RATE))
     expected_left = 0.50 - 0.20 + 0.08
     expected_right = 0.10 - (-0.05) + 0.08
     np.testing.assert_allclose(mixed[interior, 0], expected_left, atol=0.001)
     np.testing.assert_allclose(mixed[interior, 1], expected_right, atol=0.001)
-    assert not np.allclose(mixed[marker, 0], source[marker, 0] - 0.30)
     edge = mixed[start + int(0.005 * BED_RATE)]
     assert abs(float(edge[0]) - expected_left) > 0.01
     assert abs(float(edge[0]) - float(source[start + int(0.005 * BED_RATE), 0])) > 0.01

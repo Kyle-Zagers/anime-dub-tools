@@ -71,11 +71,12 @@ class PyannoteDiarizer:
             pipeline = Pipeline.from_pretrained(self.model, use_auth_token=self.token)
         if pipeline is None:
             raise DubError(f"Could not load {self.model}. Check the token and model access.")
-        want_cuda = self.device.startswith("cuda")
-        if want_cuda and not torch.cuda.is_available():
-            raise DubError("CUDA was requested for diarization, but torch.cuda.is_available() is false.")
-        if want_cuda or (self.device == "auto" and torch.cuda.is_available()):
-            pipeline.to(torch.device("cuda"))
+        if self.device.startswith("cuda"):
+            if not torch.cuda.is_available():
+                raise DubError("CUDA was requested for diarization, but torch.cuda.is_available() is false.")
+            pipeline.to(torch.device(self.device))
+        elif self.device not in {"cpu", "auto"}:
+            pipeline.to(torch.device(self.device))
         self._pipeline = pipeline
         return pipeline
 

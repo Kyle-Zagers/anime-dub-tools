@@ -118,6 +118,7 @@ def _run(
     extra: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     env.pop("HUGGINGFACE_API_KEY", None)
     env.pop("HF_TOKEN", None)
     env.pop("HUGGING_FACE_HUB_TOKEN", None)
@@ -149,6 +150,7 @@ def _run(
         capture_output=True,
         text=True,
         env=env,
+        encoding="utf-8",
         check=False,
     )
 

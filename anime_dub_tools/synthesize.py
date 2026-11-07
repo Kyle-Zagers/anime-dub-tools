@@ -168,6 +168,17 @@ class ReferenceSynthesizer:
         write_wav(destination, harmonic_stack(target_f0, count, DIALOGUE_RATE), DIALOGUE_RATE)
 
 
+def _nvidia_cuda(device: str) -> bool:
+    """bfloat16 stays on NVIDIA. Other CUDA-API devices, including ROCm, stay fp32."""
+    try:
+        import torch
+
+        index = int(device.split(":")[-1]) if ":" in device else 0
+        return "nvidia" in torch.cuda.get_device_name(index).lower()
+    except Exception:
+        return False
+
+
 class IndexTTSSynthesizer:
     """IndexTTS-2.5 cloning. Timbre and emotion are separate prompts.
 
@@ -251,7 +262,7 @@ class IndexTTSSynthesizer:
                 cfg_path=str(config),
                 model_dir=str(self.model_dir),
                 device=self.device,
-                use_bf16=self.device.startswith("cuda"),
+                use_bf16=self.device.startswith("cuda") and _nvidia_cuda(self.device),
                 use_qwen_emo=False,
             )
         except Exception as exc:

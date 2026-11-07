@@ -100,8 +100,11 @@ def dub_episode(
     if not rendered:
         raise DubError("Every subtitle line was skipped, so there is nothing to mix.")
     mix_path = work_dir / "mix.wav"
-    print("[mix] original mix outside lines; bed under dialogue", flush=True)
     vocal_bed = None if vocals.resolve() == background.resolve() else vocals
+    if vocal_bed is None:
+        print("[mix] original mix under the dub; no vocal estimate", flush=True)
+    else:
+        print("[mix] vocal-free stereo bed for the whole episode; English on each cue", flush=True)
     mix_tracks(
         background,
         [(path, start, end) for path, start, end in rendered],
