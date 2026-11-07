@@ -212,23 +212,40 @@ class IndexTTSSynthesizer:
         target_duration: float,
         destination: Path,
     ) -> None:
-        tts = self._load()
-        target_duration = max(0.12, float(target_duration))
         if emotion_reference is None:
             raise DubError(
                 "IndexTTS-2.5 needs the line's isolated audio as emo_audio_prompt."
             )
         alpha = emo_alpha_for_line(load_mono(emotion_reference, DIALOGUE_RATE))
-        print(f"[tts] emo_alpha={alpha:.2f} prompt=line-audio", flush=True)
-        factor = duration_factor_for(target_duration, text)
         raw = destination.with_suffix(".tts.wav")
         try:
-            self._infer(tts, text, speaker_reference, emotion_reference, raw, factor, alpha)
-            produced = _wav_seconds(raw)
+            self.infer_line(text, speaker_reference, emotion_reference, target_duration, raw, alpha)
+            fit_duration(raw, destination, max(0.12, float(target_duration)), DIALOGUE_RATE)
+        finally:
+            raw.unlink(missing_ok=True)
+
+    def infer_line(
+        self,
+        text: str,
+        speaker_reference: Path,
+        emotion_reference: Path,
+        target_duration: float,
+        raw_path: Path,
+        emo_alpha: float,
+    ) -> None:
+        """GPU inference only. ffmpeg time-fit stays with the caller."""
+        tts = self._load()
+        target_duration = max(0.12, float(target_duration))
+        print(f"[tts] emo_alpha={emo_alpha:.2f} prompt=line-audio", flush=True)
+        factor = duration_factor_for(target_duration, text)
+        try:
+            self._infer(tts, text, speaker_reference, emotion_reference, raw_path, factor, emo_alpha)
+            produced = _wav_seconds(raw_path)
             if produced > 0 and not 0.85 <= produced / target_duration <= 1.15:
                 adjusted = float(np.clip(factor * (target_duration / produced), 0.5, 2.0))
-                self._infer(tts, text, speaker_reference, emotion_reference, raw, adjusted, alpha)
-            fit_duration(raw, destination, target_duration, DIALOGUE_RATE)
+                self._infer(
+                    tts, text, speaker_reference, emotion_reference, raw_path, adjusted, emo_alpha
+                )
         except DubError:
             raise
         except Exception as exc:
@@ -236,8 +253,6 @@ class IndexTTSSynthesizer:
                 "IndexTTS-2.5 failed while cloning a line. Check --tts-model-dir and the GPU. "
                 f"{exc}"
             ) from exc
-        finally:
-            raw.unlink(missing_ok=True)
 
     def _load(self):
         if self._tts is not None:
@@ -320,6 +335,23 @@ class OpenVoiceSynthesizer:
         target_duration: float,
         destination: Path,
     ) -> None:
+        colored = self.infer_line(
+            text, speaker_reference, emotion_reference, target_duration, destination
+        )
+        try:
+            fit_duration(colored, destination, max(0.12, float(target_duration)), DIALOGUE_RATE)
+        finally:
+            colored.unlink(missing_ok=True)
+
+    def infer_line(
+        self,
+        text: str,
+        speaker_reference: Path,
+        emotion_reference: Path | None,
+        target_duration: float,
+        destination: Path,
+    ) -> Path:
+        """GPU clone only. Returns the unfitted wav. ffmpeg time-fit stays with the caller."""
         del emotion_reference
         converter, tts, speaker_id, source_se = self._load()
         target_duration = max(0.12, float(target_duration))
@@ -341,10 +373,14 @@ class OpenVoiceSynthesizer:
                 output_path=str(colored),
                 message="@MyShell",
             )
-            fit_duration(colored, destination, target_duration, DIALOGUE_RATE)
+            if not colored.is_file():
+                raise DubError(f"OpenVoice did not write {colored}")
+            return colored
+        except Exception:
+            colored.unlink(missing_ok=True)
+            raise
         finally:
             raw.unlink(missing_ok=True)
-            colored.unlink(missing_ok=True)
 
     def _load(self):
         if self._ready is not None:
