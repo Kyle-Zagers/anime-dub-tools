@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+
+from anime_dub_tools.schedule import cpu_workers
 
 from anime_dub_tools.models import DubError
 
@@ -430,35 +433,27 @@ def mix_tracks(
     a little. Without a separate vocal file, the original mix stays and the
     new line is added on the stereo pair.
     """
-    original_pcm, sample_rate = _load_pcm(background)
-    count = max(1, int(round(float(duration) * sample_rate)))
+    have_vocals = vocals is not None and Path(vocals).resolve() != Path(background).resolve()
+    with ThreadPoolExecutor(max_workers=cpu_workers(), thread_name_prefix="dub-mix") as pool:
+        background_job = pool.submit(_load_pcm, background)
+        vocal_job = pool.submit(_load_pcm, vocals) if have_vocals and vocals is not None else None
+        original_pcm, sample_rate = background_job.result()
+        count = max(1, int(round(float(duration) * sample_rate)))
+        decoded = list(pool.map(lambda item: _decode_line(item, sample_rate, count), lines))
+        vocal_pcm = vocal_job.result() if vocal_job is not None else None
     original_pcm = _pad_trim_pcm(original_pcm, count)
     original = original_pcm.astype(np.float32) / 32768.0
-    have_vocals = vocals is not None and Path(vocals).resolve() != Path(background).resolve()
-    if have_vocals:
-        estimate = _vocal_estimate(vocals, sample_rate, count, min(2, original.shape[1]))
+    if have_vocals and vocal_pcm is not None and vocals is not None:
+        vocal_audio, vocal_rate = vocal_pcm
+        estimate = _vocal_estimate_pcm(vocal_audio, vocal_rate, sample_rate, count, min(2, original.shape[1]))
         output = stereo_bed(original, estimate)
     else:
         output = original.copy()
     pair = min(2, output.shape[1])
-    for item in lines:
-        path, start, end = _parse_line(item)
-        mono, line_rate = _line_mono(path)
-        if line_rate != sample_rate and len(mono):
-            mono = resample_linear(mono, max(1, int(round(len(mono) * sample_rate / line_rate))))
-        start_i = int(round(start * sample_rate))
-        if start_i < 0:
-            mono = mono[-start_i:]
-            start_i = 0
-        end_i = start_i + len(mono) if end is None else int(round(end * sample_rate))
-        end_i = min(count, end_i)
-        if start_i >= end_i or start_i >= count:
+    for piece in decoded:
+        if piece is None:
             continue
-        length = end_i - start_i
-        gain = line_fade_gain(length, sample_rate)
-        dialogue = np.zeros(length, dtype=np.float32)
-        take = min(length, len(mono))
-        dialogue[:take] = mono[:take]
+        start_i, end_i, dialogue, gain = piece
         output[start_i:end_i, :pair] += dialogue[:, None] * gain[:, None]
     written = output[:, :2] if have_vocals else output
     _write_pcm(destination, _float_to_pcm(written), sample_rate)
@@ -472,6 +467,47 @@ def _parse_line(item: tuple[Path, float] | tuple[Path, float, float]) -> tuple[P
     return path, float(start), float(end)
 
 
+def _decode_line(
+    item: tuple[Path, float] | tuple[Path, float, float], sample_rate: int, count: int
+) -> tuple[int, int, np.ndarray, np.ndarray] | None:
+    path, start, end = _parse_line(item)
+    mono, line_rate = _line_mono(path)
+    if line_rate != sample_rate and len(mono):
+        mono = resample_linear(mono, max(1, int(round(len(mono) * sample_rate / line_rate))))
+    start_i = int(round(start * sample_rate))
+    if start_i < 0:
+        mono = mono[-start_i:]
+        start_i = 0
+    end_i = start_i + len(mono) if end is None else int(round(end * sample_rate))
+    end_i = min(count, end_i)
+    if start_i >= end_i or start_i >= count:
+        return None
+    length = end_i - start_i
+    gain = line_fade_gain(length, sample_rate)
+    dialogue = np.zeros(length, dtype=np.float32)
+    take = min(length, len(mono))
+    dialogue[:take] = mono[:take]
+    return start_i, end_i, dialogue, gain
+
+
+def _vocal_estimate_pcm(
+    pcm: np.ndarray, vocal_rate: int, sample_rate: int, count: int, pair: int
+) -> np.ndarray:
+    audio = pcm.astype(np.float32) / 32768.0
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if vocal_rate != sample_rate and len(audio):
+        target = max(1, int(round(len(audio) * sample_rate / vocal_rate)))
+        audio = np.stack(
+            [resample_linear(audio[:, channel], target) for channel in range(audio.shape[1])],
+            axis=1,
+        )
+    audio = pad_trim_2d(audio, count)
+    if audio.shape[1] == 1 and pair == 2:
+        audio = np.repeat(audio, 2, axis=1)
+    return audio[:, :pair]
+
+
 def _line_mono(path: Path) -> tuple[np.ndarray, int]:
     pcm, sample_rate = _load_pcm(path)
     if pcm.size == 0:
@@ -479,20 +515,6 @@ def _line_mono(path: Path) -> tuple[np.ndarray, int]:
     audio = pcm.astype(np.float32) / 32768.0
     mono = audio.mean(axis=1) if audio.shape[1] > 1 else audio[:, 0]
     return mono, sample_rate
-
-
-def _vocal_estimate(path: Path, sample_rate: int, count: int, pair: int) -> np.ndarray:
-    pcm, vocal_rate = _load_pcm(path)
-    audio = pcm.astype(np.float32) / 32768.0
-    if audio.ndim == 1:
-        audio = audio[:, None]
-    if vocal_rate != sample_rate and len(audio):
-        target = max(1, int(round(len(audio) * sample_rate / vocal_rate)))
-        audio = np.stack([resample_linear(audio[:, channel], target) for channel in range(audio.shape[1])], axis=1)
-    audio = pad_trim_2d(audio, count)
-    if audio.shape[1] == 1 and pair == 2:
-        audio = np.repeat(audio, 2, axis=1)
-    return audio[:, :pair]
 
 
 def _pad_trim_pcm(pcm: np.ndarray, count: int) -> np.ndarray:
