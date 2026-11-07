@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         device = _device(args.device, neural=_needs_torch(args))
+        print(f"[device] {_device_label(device)}", flush=True)
         separator = build_separator(args.separator, args.separator_model, device)
         diarizer = build_diarizer(
             args.diarizer,
@@ -148,6 +149,18 @@ def _device(preference: str, neural: bool) -> str:
         torch.cuda.set_device(index)
         return f"cuda:{index}"
     return "cpu"
+
+
+def _device_label(device: str) -> str:
+    if not device.startswith("cuda"):
+        return device
+    try:
+        import torch
+
+        index = int(device.split(":")[-1]) if ":" in device else 0
+        return f"{device} {torch.cuda.get_device_name(index)}"
+    except Exception:
+        return device
 
 
 def _largest_cuda_index() -> int:
