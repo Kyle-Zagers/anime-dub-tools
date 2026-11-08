@@ -20,7 +20,8 @@ def test_actor_names_stay_consistent_when_diarization_flips():
     assert rows["Luna"].actor == "Luna"
     assert rows["Sol"].lines == 1
     intervals = reference_intervals("Luna", assigned, turns)
-    assert intervals == [(0.0, 1.0)]
+    assert intervals == [(0.0, 1.0), (2.4, 3.4)]
+    assert reference_intervals("Sol", assigned, turns) == [(1.2, 2.2)]
 
 
 def test_unnamed_lines_follow_diarized_speakers():

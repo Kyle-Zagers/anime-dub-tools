@@ -114,15 +114,14 @@ class ReferenceSynthesizer:
     def notice(self) -> str:
         if self.label.endswith("harmonic"):
             return (
-                "backend=reference/harmonic. espeak-ng is not available, so each line is a "
-                "tone at the speaker's pitch with the line's loudness contour. It is not "
-                "English speech. Install espeak-ng, or use --tts indextts / openvoice."
+                "backend=reference/harmonic. This is an offline stub, not a finished dub. "
+                "espeak-ng is not available, so each line is a tone at the speaker's pitch "
+                "with the line's loudness contour. It is not English speech."
             )
         return (
-            "backend=reference/espeak-ng. Pronunciation comes from espeak-ng. Pitch and "
-            "loudness are taken from this episode's isolated dialogue, not from a voice "
-            "library. This is intelligible and robotic. --tts indextts clones a speaking "
-            "voice from those same lines and uses each line as the emotion reference."
+            "backend=reference/espeak-ng. This is an offline stub, not a finished dub. "
+            "espeak-ng speaks the English words. Pitch and loudness come from this episode. "
+            "It is not a cloned voice. A real dub uses --tts indextts."
         )
 
     def synthesize(
@@ -447,7 +446,12 @@ def build_synthesizer(name: str, model_dir: Path | None, openvoice_dir: Path | N
             return IndexTTSSynthesizer(model_dir, device)
         if openvoice_dir is not None and (openvoice_dir / "converter" / "config.json").is_file():
             return OpenVoiceSynthesizer(openvoice_dir, device)
-        return ReferenceSynthesizer("auto")
+        raise DubError(
+            "No speech model is configured. IndexTTS-2.5 is the voice for a real dub. "
+            "Set --tts-model-dir or INDEXTTS_MODEL_DIR to a directory that contains config.yaml. "
+            "Missing weights stop here. "
+            "--tts reference is an espeak-ng stub for wiring checks and is not a finished dub."
+        )
     raise DubError(f"Unknown TTS backend {name!r}. Use auto, indextts, openvoice, or reference.")
 
 
