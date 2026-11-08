@@ -466,9 +466,12 @@ def qwen_voice_for(character: str) -> str:
 
     The isolated episode clip is not a prompt. Cloning it copies the
     separation noise into every line. A diarizer label uses the same list,
-    in the order the labels are numbered.
+    in the order the labels are numbered. A name that is already a studio
+    preset stays that preset.
     """
     text = character.strip()
+    if text in QWEN_STUDIO_VOICES:
+        return text
     numbered = re.fullmatch(r"(?:SPEAKER_)?(\d+)", text, flags=re.IGNORECASE)
     if numbered:
         index = int(numbered.group(1))
@@ -603,7 +606,27 @@ class QwenSynthesizer:
         return self._model
 
 
-def build_synthesizer(name: str, model_dir: Path | None, openvoice_dir: Path | None, device: str):
+def _qwen_directory(model_dir: Path | None, qwen_dir: Path | None) -> Path | None:
+    """A CustomVoice directory. IndexTTS is the directory that has config.yaml."""
+    if qwen_dir is not None and qwen_dir.is_dir():
+        return qwen_dir
+    if (
+        model_dir is not None
+        and model_dir.is_dir()
+        and (model_dir / "config.json").is_file()
+        and not (model_dir / "config.yaml").is_file()
+    ):
+        return model_dir
+    return None
+
+
+def build_synthesizer(
+    name: str,
+    model_dir: Path | None,
+    openvoice_dir: Path | None,
+    device: str,
+    qwen_dir: Path | None = None,
+):
     if name == "reference":
         return ReferenceSynthesizer("auto")
     if name == "indextts":
@@ -611,22 +634,29 @@ def build_synthesizer(name: str, model_dir: Path | None, openvoice_dir: Path | N
             raise DubError("IndexTTS needs --tts-model-dir or INDEXTTS_MODEL_DIR.")
         return IndexTTSSynthesizer(model_dir, device)
     if name == "qwen3":
-        if model_dir is None:
-            raise DubError("Qwen3-TTS needs --tts-model-dir or INDEXTTS_MODEL_DIR.")
-        return QwenSynthesizer(model_dir, device)
+        chosen = _qwen_directory(model_dir, qwen_dir)
+        if chosen is None:
+            raise DubError(
+                "Qwen3-TTS needs --tts-model-dir or QWEN_TTS_MODEL_DIR, a directory of "
+                "Qwen3-TTS-12Hz-1.7B-CustomVoice weights."
+            )
+        return QwenSynthesizer(chosen, device)
     if name == "openvoice":
         if openvoice_dir is None:
             raise DubError("OpenVoice needs --openvoice-dir or OPENVOICE_DIR.")
         return OpenVoiceSynthesizer(openvoice_dir, device)
     if name == "auto":
+        qwen = _qwen_directory(model_dir, qwen_dir)
+        if qwen is not None:
+            return QwenSynthesizer(qwen, device)
         if model_dir is not None and (model_dir / "config.yaml").is_file():
             return IndexTTSSynthesizer(model_dir, device)
         if openvoice_dir is not None and (openvoice_dir / "converter" / "config.json").is_file():
             return OpenVoiceSynthesizer(openvoice_dir, device)
         raise DubError(
-            "No speech model is configured. IndexTTS-2.5 is the voice for a real dub. "
-            "Set --tts-model-dir or INDEXTTS_MODEL_DIR to a directory that contains config.yaml. "
-            "For clean studio voices, pass --tts qwen3 and a Qwen3-TTS CustomVoice directory. "
+            "No speech model is configured. Set QWEN_TTS_MODEL_DIR to a "
+            "Qwen3-TTS-12Hz-1.7B-CustomVoice directory, or pass --tts-model-dir. "
+            "IndexTTS still works when that directory contains config.yaml. "
             "Missing weights stop here. "
             "--tts reference is an espeak-ng stub for wiring checks and is not a finished dub."
         )

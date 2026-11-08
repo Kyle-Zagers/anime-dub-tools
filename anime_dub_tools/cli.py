@@ -19,9 +19,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="anime_dub_tools",
         description=(
-            "Dub one anime episode into English. The episode audio is the only "
-            "voice source. English subtitles supply the words. A language model "
-            "reads those cues and keeps one character id for the episode."
+            "Dub one episode from its video and English subtitles. "
+            "Set QWEN_TTS_MODEL_DIR, ANIME_DUB_SCRIPT_MODEL, and a Hugging Face "
+            "token, then pass --episode, --subs, and --out."
         ),
     )
     parser.add_argument("--episode", required=True, type=Path, help="Video or audio for one episode.")
@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             args.tts_model_dir,
             args.openvoice_dir,
             device,
+            qwen_dir=_qwen_dir(args.tts_model_dir),
         )
         script_writer = build_script_writer(
             args.script_model,
@@ -129,6 +130,21 @@ def _token(explicit: str | None) -> str | None:
     )
 
 
+def _qwen_dir(model_dir: Path | None) -> Path | None:
+    """QWEN_TTS_MODEL_DIR, or --tts-model-dir when that directory is CustomVoice."""
+    env = _env_path("QWEN_TTS_MODEL_DIR")
+    if env is not None and env.is_dir():
+        return env
+    if (
+        model_dir is not None
+        and model_dir.is_dir()
+        and (model_dir / "config.json").is_file()
+        and not (model_dir / "config.yaml").is_file()
+    ):
+        return model_dir
+    return None
+
+
 def _env_path(name: str) -> Path | None:
     value = os.environ.get(name)
     if not value:
@@ -142,6 +158,8 @@ def _needs_torch(args) -> bool:
     if args.tts in {"indextts", "qwen3", "openvoice"}:
         return True
     if args.device == "cuda":
+        return True
+    if args.tts == "auto" and _qwen_dir(args.tts_model_dir) is not None:
         return True
     if args.tts == "auto" and args.tts_model_dir and (args.tts_model_dir / "config.yaml").is_file():
         return True

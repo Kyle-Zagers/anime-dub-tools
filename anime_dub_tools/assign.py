@@ -140,7 +140,7 @@ def pitch_ordered_voices(
     audio = np.asarray(samples, dtype=np.float32).reshape(-1)
     pitches: dict[str, list[float]] = {}
     for item in assigned:
-        found = _cue_pitch(audio, sample_rate, item.cue.start, item.cue.end)
+        found = cue_pitch(audio, sample_rate, item.cue.start, item.cue.end)
         if found is None:
             continue
         pitches.setdefault(item.speaker, []).append(found)
@@ -154,7 +154,7 @@ def pitch_ordered_voices(
     return [replace(item, speaker=labels[item.speaker]) for item in assigned]
 
 
-def _cue_pitch(samples: np.ndarray, sample_rate: int, start: float, end: float) -> float | None:
+def cue_pitch(samples: np.ndarray, sample_rate: int, start: float, end: float) -> float | None:
     left = int(start * sample_rate)
     right = max(left + 1, int(end * sample_rate))
     clip = samples[left:right]
