@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.script_stub import ScriptStub
+
 import numpy as np
 import pytest
 
@@ -10,6 +12,7 @@ from anime_dub_tools.audio import DIALOGUE_RATE, estimate_f0, has_video_stream, 
 from anime_dub_tools.diarize import SpectralDiarizer
 from anime_dub_tools.models import DubError
 from anime_dub_tools.pipeline import dub_episode
+from anime_dub_tools.script import ScriptLine
 from anime_dub_tools.separate import build_separator
 from anime_dub_tools.synthesize import ReferenceSynthesizer
 
@@ -30,6 +33,7 @@ def test_pipeline_clones_pitch_from_the_episode_and_mixes(tmp_path: Path):
         separator=build_separator("copy", None),
         diarizer=SpectralDiarizer(),
         synthesizer=ReferenceSynthesizer("harmonic"),
+        script_writer=_ActorScript(),
         work_dir=work,
     )
     assert out.is_file()
@@ -110,6 +114,11 @@ def test_missing_episode_is_an_error(tmp_path: Path):
     assert "Episode not found" in result.stderr
 
 
+class _ActorScript:
+    def write(self, cues):
+        return [ScriptLine(cue.index, cue.actor or "c1", cue.text) for cue in cues]
+
+
 def _run(
     episode: Path,
     subs: Path,
@@ -125,34 +134,41 @@ def _run(
     env.pop("INDEXTTS_MODEL_DIR", None)
     env.pop("OPENVOICE_DIR", None)
     env.pop("MUSETALK_MODEL_DIR", None)
-    return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "anime_dub_tools",
-            "--episode",
-            str(episode),
-            "--subs",
-            str(subs),
-            "--out",
-            str(out),
-            "--separator",
-            "copy",
-            "--diarizer",
-            "spectral",
-            "--tts",
-            "reference",
-            "--keep-work",
-            str(work),
-            *(extra or []),
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        env=env,
-        encoding="utf-8",
-        check=False,
-    )
+    env.pop("ANIME_DUB_SCRIPT_API_KEY", None)
+    stub = ScriptStub()
+    env["ANIME_DUB_SCRIPT_ENDPOINT"] = stub.endpoint
+    env["ANIME_DUB_SCRIPT_MODEL"] = "test-script"
+    try:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "anime_dub_tools",
+                "--episode",
+                str(episode),
+                "--subs",
+                str(subs),
+                "--out",
+                str(out),
+                "--separator",
+                "copy",
+                "--diarizer",
+                "spectral",
+                "--tts",
+                "reference",
+                "--keep-work",
+                str(work),
+                *(extra or []),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            env=env,
+            encoding="utf-8",
+            check=False,
+        )
+    finally:
+        stub.close()
 
 
 def _line_speakers(stdout: str) -> dict[int, str]:

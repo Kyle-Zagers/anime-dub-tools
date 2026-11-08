@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 
 from anime_dub_tools.assign import (
-    assign_cues,
     emotion_interval,
     format_line_log,
     format_speaker_map,
@@ -31,6 +30,7 @@ from anime_dub_tools.audio import (
 )
 from anime_dub_tools.models import AssignedCue, DubError, Turn
 from anime_dub_tools.schedule import cpu_workers, overlap_line_work
+from anime_dub_tools.script import apply_script, script_configuration_error
 from anime_dub_tools.subtitles import parse_subtitles
 from anime_dub_tools.synthesize import emo_alpha_for_line
 
@@ -43,6 +43,7 @@ def dub_episode(
     separator,
     diarizer,
     synthesizer,
+    script_writer,
     work_dir: Path,
     lips: bool = False,
     lips_model_dir: Path | None = None,
@@ -50,6 +51,8 @@ def dub_episode(
     require_ffmpeg()
     if not episode.is_file():
         raise DubError(f"Episode not found: {episode}")
+    if script_writer is None:
+        raise DubError(script_configuration_error())
     work_dir.mkdir(parents=True, exist_ok=True)
     extracted = work_dir / "episode.wav"
     print(f"[extract] {episode}", flush=True)
@@ -59,6 +62,15 @@ def dub_episode(
         duration = media_duration(extracted)
         if duration <= 0:
             raise DubError(f"No audio duration in {episode}")
+
+        cues = cues_job.result()
+        print("[script] reading English cues", flush=True)
+        script = script_writer.write(cues)
+        print(
+            f"[script] lines={len(script)} characters={len({line.character for line in script})}",
+            flush=True,
+        )
+        print("[script] character ids come from the subtitle script; diarizer labels are not voices", flush=True)
 
         print(f"[separate] {separator.name}", flush=True)
         _emit_notice(separator)
@@ -70,10 +82,9 @@ def dub_episode(
         turns = diarizer.diarize(vocals)
         print(f"[diarize] turns={len(turns)} speakers={len({turn.speaker for turn in turns})}", flush=True)
         if not turns:
-            print("[diarize] no speech turns found; unnamed lines share SPEAKER_00", flush=True)
+            print("[diarize] no speech turns found; cue audio is sliced per character", flush=True)
 
-        cues = cues_job.result()
-        assigned = assign_cues(cues, turns)
+        assigned = apply_script(cues, script, turns)
         rows = speaker_rows(assigned)
         print(format_speaker_map(rows), flush=True)
         print(format_line_log(assigned), flush=True)
@@ -160,7 +171,7 @@ def _render_lines(assigned, duration, work_dir, vocal_audio, turns, references, 
         if not split:
             try:
                 synthesizer.synthesize(
-                    job.item.cue.text,
+                    job.item.line_text(),
                     job.speaker_reference,
                     job.emotion,
                     job.end - job.start,
@@ -179,7 +190,7 @@ def _render_lines(assigned, duration, work_dir, vocal_audio, turns, references, 
                 if job.emotion is None or job.emo_alpha is None:
                     raise DubError(f"Line {job.item.cue.index} has no emotion prompt.")
                 synthesizer.infer_line(
-                    job.item.cue.text,
+                    job.item.line_text(),
                     job.speaker_reference,
                     job.emotion,
                     job.end - job.start,
@@ -188,7 +199,7 @@ def _render_lines(assigned, duration, work_dir, vocal_audio, turns, references, 
                 )
             else:
                 raw = synthesizer.infer_line(
-                    job.item.cue.text,
+                    job.item.line_text(),
                     job.speaker_reference,
                     job.emotion,
                     job.end - job.start,

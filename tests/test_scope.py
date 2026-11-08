@@ -12,6 +12,8 @@ def test_package_has_no_show_roster():
     text = "\n".join(path.read_text(encoding="utf-8") for path in PACKAGE.rglob("*.py"))
     for word in FORBIDDEN:
         assert word not in text
+    assert "VoiceStudio" not in text
+    assert "debpalash" not in text
 
 
 @pytest.mark.live_models

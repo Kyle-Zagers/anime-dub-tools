@@ -29,6 +29,13 @@ class AssignedCue:
     speaker: str
     start: float
     end: float
+    spoken: str | None = None
+
+    def line_text(self) -> str:
+        """Words to speak. The subtitle line, unless a script cleanup replaced nothing of meaning."""
+        if self.spoken is None:
+            return self.cue.text
+        return self.spoken
 
 
 @dataclass(frozen=True)

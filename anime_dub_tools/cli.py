@@ -9,6 +9,7 @@ from pathlib import Path
 from anime_dub_tools.diarize import DEFAULT_DIARIZER_MODEL, build_diarizer
 from anime_dub_tools.models import DubError
 from anime_dub_tools.pipeline import dub_episode
+from anime_dub_tools.script import build_script_writer
 from anime_dub_tools.separate import DEFAULT_SEPARATOR_MODEL, build_separator
 from anime_dub_tools.synthesize import build_synthesizer
 
@@ -19,8 +20,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="anime_dub_tools",
         description=(
             "Dub one anime episode into English. The episode audio is the only "
-            "voice source. English subtitles supply the words. Speaker names come "
-            "from the subtitle name field when it has one, otherwise from diarization."
+            "voice source. English subtitles supply the words. A language model "
+            "reads those cues and keeps one character id for the episode."
         ),
     )
     parser.add_argument("--episode", required=True, type=Path, help="Video or audio for one episode.")
@@ -33,6 +34,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tts", choices=("auto", "indextts", "openvoice", "reference"), default="auto")
     parser.add_argument("--tts-model-dir", type=Path, default=_env_path("INDEXTTS_MODEL_DIR"))
     parser.add_argument("--openvoice-dir", type=Path, default=_env_path("OPENVOICE_DIR"))
+    parser.add_argument(
+        "--script-model",
+        default=os.environ.get("ANIME_DUB_SCRIPT_MODEL"),
+        help="Local GGUF path, or the model name when --script-endpoint is set. Env: ANIME_DUB_SCRIPT_MODEL.",
+    )
+    parser.add_argument(
+        "--script-endpoint",
+        default=os.environ.get("ANIME_DUB_SCRIPT_ENDPOINT"),
+        help="Optional OpenAI-compatible base URL. Off unless set. Env: ANIME_DUB_SCRIPT_ENDPOINT.",
+    )
     parser.add_argument("--hf-token", default=None, help="Hugging Face token. Prefer the environment.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--keep-work", type=Path, default=None, help="Keep intermediate wavs in this directory.")
@@ -44,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lips-model-dir", type=Path, default=_env_path("MUSETALK_MODEL_DIR"))
     args = parser.parse_args(argv)
     try:
+        if not args.episode.is_file():
+            raise DubError(f"Episode not found: {args.episode}")
         device = _device(args.device, neural=_needs_torch(args))
         print(f"[device] {_device_label(device)}", flush=True)
         separator = build_separator(args.separator, args.separator_model, device)
@@ -59,10 +72,16 @@ def main(argv: list[str] | None = None) -> int:
             args.openvoice_dir,
             device,
         )
+        script_writer = build_script_writer(
+            args.script_model,
+            args.script_endpoint,
+            os.environ.get("ANIME_DUB_SCRIPT_API_KEY"),
+        )
         dub_kwargs = {
             "separator": separator,
             "diarizer": diarizer,
             "synthesizer": synthesizer,
+            "script_writer": script_writer,
             "lips": args.lips,
             "lips_model_dir": args.lips_model_dir,
         }

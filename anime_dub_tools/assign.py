@@ -4,12 +4,12 @@ from anime_dub_tools.models import AssignedCue, Cue, SpeakerRow, Turn, overlap
 
 
 def assign_cues(cues: list[Cue], turns: list[Turn]) -> list[AssignedCue]:
-    """Give every line a stable speaker for this episode.
+    """Map cues to subtitle names or diarizer labels.
 
-    A subtitle name/actor is the speaker id when the file has one, so the same
-    name keeps one voice even if diarization flips a later line. Lines with no
-    name follow the diarized speaker with the greatest overlap, which stays
-    consistent for the episode because the diarizer labels are.
+    The episode path does not use this. A script character id is the voice.
+    A subtitle name still wins over a diarizer label when this helper is called
+    on its own. Lines with no name follow the diarized speaker with the greatest
+    overlap.
     """
     assigned: list[AssignedCue] = []
     for cue in cues:
@@ -55,22 +55,25 @@ def format_line_log(assigned: list[AssignedCue]) -> str:
 def reference_intervals(
     speaker: str, assigned: list[AssignedCue], turns: list[Turn]
 ) -> list[tuple[float, float]]:
-    """Vocal spans that represent this speaker.
+    """Vocal spans from this character's own cues.
 
-    Named and unnamed speakers both prefer diarized speech that overlaps their
-    lines. Cue windows are the fallback when diarization missed them.
+    A diarizer label is only a time hint. The whole cluster is not the voice:
+    a cluster that also covers someone else is clipped to this character's
+    cues, and a character split across clusters still contributes every cue.
     """
     own = [item for item in assigned if item.speaker == speaker]
-    scores: dict[str, float] = {}
+    spans: list[tuple[float, float]] = []
     for item in own:
+        hit = False
         for turn in turns:
-            covered = overlap(item.cue.start, item.cue.end, turn.start, turn.end)
-            if covered > 0:
-                scores[turn.speaker] = scores.get(turn.speaker, 0.0) + covered
-    if scores:
-        best = min(scores, key=lambda label: (-scores[label], label))
-        return [(turn.start, turn.end) for turn in turns if turn.speaker == best]
-    return [(item.cue.start, item.cue.end) for item in own]
+            start = max(item.cue.start, turn.start)
+            end = min(item.cue.end, turn.end)
+            if end - start >= 0.05:
+                spans.append((start, end))
+                hit = True
+        if not hit:
+            spans.append((item.cue.start, item.cue.end))
+    return spans
 
 
 def emotion_interval(cue: Cue, turns: list[Turn]) -> tuple[float, float]:
@@ -83,7 +86,10 @@ def emotion_interval(cue: Cue, turns: list[Turn]) -> tuple[float, float]:
             best = turn
             best_overlap = covered
     if best is not None and best_overlap >= 0.12:
-        return best.start, best.end
+        start = max(best.start, cue.start)
+        end = min(best.end, cue.end)
+        if end > start:
+            return start, end
     return cue.start, cue.end
 
 
