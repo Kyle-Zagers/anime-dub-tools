@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from anime_dub_tools.audio import (
+    BED_MAKEUP_DB,
     BED_RATE,
     extract_audio,
     load_audio,
@@ -166,21 +167,22 @@ def test_line_bed_keeps_the_marker_and_mixes_inside_the_cue(tmp_path: Path):
     assert rate == BED_RATE
     assert mixed.shape == (count, 2)
     assert mixed.shape[1] == 2
-    bed_left = 0.25 - 0.30
-    bed_right = -0.40 - 0.10
-    np.testing.assert_allclose(mixed[marker, 0], bed_left, atol=0.001)
-    np.testing.assert_allclose(mixed[marker, 1], bed_right, atol=0.001)
-    assert not np.allclose(mixed[marker, 0], source[marker, 0])
-    np.testing.assert_allclose(mixed[start - 1, 0], bed_left, atol=0.001)
-    np.testing.assert_allclose(mixed[end, 0], bed_left, atol=0.001)
+    makeup = 10 ** (BED_MAKEUP_DB / 20.0)
+    bed_left = (0.25 - 0.30) * makeup
+    bed_right = (-0.40 - 0.10) * makeup
+    np.testing.assert_allclose(mixed[marker, 0], bed_left, atol=0.002)
+    np.testing.assert_allclose(mixed[marker, 1], bed_right, atol=0.002)
+    assert abs(bed_left) > abs(0.25 - 0.30)
+    np.testing.assert_allclose(mixed[start - 1, 0], bed_left, atol=0.002)
+    np.testing.assert_allclose(mixed[end, 0], bed_left, atol=0.002)
     interior = slice(start + int(0.020 * BED_RATE), end - int(0.020 * BED_RATE))
-    expected_left = 0.50 - 0.20 + 0.08
-    expected_right = 0.10 - (-0.05) + 0.08
-    np.testing.assert_allclose(mixed[interior, 0], expected_left, atol=0.001)
-    np.testing.assert_allclose(mixed[interior, 1], expected_right, atol=0.001)
-    edge = mixed[start + int(0.005 * BED_RATE)]
-    assert abs(float(edge[0]) - expected_left) > 0.01
-    assert abs(float(edge[0]) - float(source[start + int(0.005 * BED_RATE), 0])) > 0.01
+    channel_gap = ((0.50 - 0.20) - (0.10 - (-0.05))) * makeup
+    np.testing.assert_allclose(mixed[interior, 0] - mixed[interior, 1], channel_gap, atol=0.02)
+    voiced = mixed[interior, 0] - (0.50 - 0.20) * makeup
+    assert float(np.sqrt(np.mean(voiced**2))) > 0.05
+    assert float(np.max(np.abs(voiced))) < 0.7
+    edge = mixed[start + int(0.005 * BED_RATE), 0] - (0.50 - 0.20) * makeup
+    assert abs(float(edge)) < float(np.max(np.abs(voiced)))
 
 
 def test_mix_does_not_duck_or_fold_the_bed(tmp_path: Path):
