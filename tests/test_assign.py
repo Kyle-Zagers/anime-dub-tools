@@ -1,4 +1,13 @@
-from anime_dub_tools.assign import acoustic_speakers, assign_cues, fit_window, reference_intervals, speaker_rows
+import numpy as np
+
+from anime_dub_tools.assign import (
+    acoustic_speakers,
+    assign_cues,
+    fit_window,
+    pitch_ordered_voices,
+    reference_intervals,
+    speaker_rows,
+)
 from anime_dub_tools.models import AssignedCue, Cue, Turn
 
 
@@ -74,3 +83,17 @@ def test_acoustic_speakers_replace_a_script_id_when_the_center_overlaps():
     voiced = acoustic_speakers(cues, turns)
     assert [item.speaker for item in voiced] == ["SPEAKER_00", "SPEAKER_01", "c2"]
     assert voiced[0].line_text() == "Look out."
+
+
+def test_lower_japanese_voice_takes_the_earlier_preset():
+    rate = 16000
+    low = np.sin(2 * np.pi * 120 * np.arange(rate) / rate).astype(np.float32)
+    high = np.sin(2 * np.pi * 240 * np.arange(rate) / rate).astype(np.float32)
+    audio = np.concatenate([low, high])
+    assigned = [
+        AssignedCue(Cue(1, 0.0, 1.0, "Low.", None), "SPEAKER_07", 0.0, 1.0),
+        AssignedCue(Cue(2, 1.0, 2.0, "High.", None), "SPEAKER_00", 1.0, 2.0),
+        AssignedCue(Cue(3, 0.0, 1.0, "Low again.", None), "SPEAKER_07", 0.0, 1.0),
+    ]
+    ordered = pitch_ordered_voices(assigned, audio, rate)
+    assert [item.speaker for item in ordered] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]

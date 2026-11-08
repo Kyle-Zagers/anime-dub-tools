@@ -28,7 +28,7 @@ from anime_dub_tools.lips import (
     select_patch,
 )
 from anime_dub_tools.models import DubError
-from anime_dub_tools.separate import DEFAULT_SEPARATOR_MODEL, RoformerSeparator
+from anime_dub_tools.separate import DEFAULT_SEPARATOR_MODEL, RoformerSeparator, dialogue_for_voices
 from anime_dub_tools.synthesize import (
     BASE_EMO_ALPHA,
     EXTREME_EMO_ALPHA,
@@ -430,6 +430,33 @@ def _write_pattern_video(path: Path, wav: Path) -> None:
     raw.unlink(missing_ok=True)
     if result.returncode != 0 or not path.is_file():
         raise RuntimeError(result.stderr[-500:])
+
+
+def test_voice_diarizer_hears_the_isolated_center(tmp_path: Path):
+    bus = tmp_path / "center.wav"
+    bus.write_bytes(b"bus")
+
+    class _Copy:
+        name = "copy"
+
+        def separate(self, audio, work_dir):
+            raise AssertionError("a copy separator must not run on the center")
+
+    assert dialogue_for_voices(bus, _Copy(), tmp_path / "unused") == bus
+
+    class _Roformer:
+        name = "roformer"
+
+        def separate(self, audio, work_dir):
+            assert audio == bus
+            work_dir.mkdir(parents=True, exist_ok=True)
+            vocals = work_dir / "vocals.wav"
+            vocals.write_bytes(b"japanese")
+            return vocals, audio
+
+    heard = dialogue_for_voices(bus, _Roformer(), tmp_path / "dialogue-vocals")
+    assert heard.name == "vocals.wav"
+    assert heard.read_bytes() == b"japanese"
 
 
 def _frame(path: Path) -> np.ndarray:

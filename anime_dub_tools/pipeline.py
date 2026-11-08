@@ -13,6 +13,7 @@ from anime_dub_tools.assign import (
     emotion_interval,
     format_line_log,
     format_speaker_map,
+    pitch_ordered_voices,
     reference_intervals,
     speaker_rows,
 )
@@ -34,6 +35,7 @@ from anime_dub_tools.audio import (
 from anime_dub_tools.models import AssignedCue, DubError, Turn
 from anime_dub_tools.schedule import cpu_workers, overlap_line_work
 from anime_dub_tools.script import apply_script, script_configuration_error
+from anime_dub_tools.separate import dialogue_for_voices
 from anime_dub_tools.subtitles import parse_subtitles
 from anime_dub_tools.synthesize import emo_alpha_for_line
 
@@ -90,15 +92,20 @@ def dub_episode(
         assigned = apply_script(cues, script, turns)
         if getattr(synthesizer, "name", None) == "qwen3":
             bus = work_dir / "dialogue-bus.wav"
+            voice_audio = None
             if write_dialogue_bus(extracted, bus):
-                print("[voices] diarizing the center channel", flush=True)
-                voice_turns = diarizer.diarize(bus)
+                voice_audio = dialogue_for_voices(bus, separator, work_dir / "dialogue-vocals")
+                print("[voices] diarizing the isolated Japanese", flush=True)
+                voice_turns = diarizer.diarize(voice_audio)
             else:
                 voice_turns = turns
             count = len({turn.speaker for turn in voice_turns})
             print(f"[voices] turns={len(voice_turns)} speakers={count}", flush=True)
             assigned = acoustic_speakers(assigned, voice_turns)
-            print("[voices] each voice follows the center-channel speaker", flush=True)
+            if voice_audio is not None:
+                isolated = load_mono(voice_audio, 16000)
+                assigned = pitch_ordered_voices(assigned, isolated, 16000)
+            print("[voices] each voice follows the isolated Japanese speaker", flush=True)
         rows = speaker_rows(assigned)
         print(format_speaker_map(rows), flush=True)
         print(format_line_log(assigned), flush=True)

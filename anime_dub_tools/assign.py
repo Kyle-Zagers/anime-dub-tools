@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import numpy as np
+
+from anime_dub_tools.audio import estimate_f0
 from anime_dub_tools.models import AssignedCue, Cue, SpeakerRow, Turn, overlap
 
 
@@ -121,6 +124,56 @@ def acoustic_speakers(assigned: list[AssignedCue], turns: list[Turn]) -> list[As
             continue
         voiced.append(replace(item, speaker=_speaker_for_cue(item.cue, turns)))
     return voiced
+
+
+def pitch_ordered_voices(
+    assigned: list[AssignedCue], samples: np.ndarray, sample_rate: int
+) -> list[AssignedCue]:
+    """Give lower Japanese voices the earlier presets.
+
+    Diarizer numbers are arbitrary. The first studio presets are the lower
+    voices and the later presets are the higher ones, so a cluster's pitch
+    picks the preset. Lines that share a cluster still share a preset.
+    """
+    if sample_rate <= 0 or not assigned:
+        return assigned
+    audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+    pitches: dict[str, list[float]] = {}
+    for item in assigned:
+        found = _cue_pitch(audio, sample_rate, item.cue.start, item.cue.end)
+        if found is None:
+            continue
+        pitches.setdefault(item.speaker, []).append(found)
+    ranked = sorted(
+        pitches,
+        key=lambda speaker: (float(np.median(pitches[speaker])), speaker),
+    )
+    missing = sorted({item.speaker for item in assigned} - set(ranked))
+    order = ranked + missing
+    labels = {speaker: f"SPEAKER_{index:02d}" for index, speaker in enumerate(order)}
+    return [replace(item, speaker=labels[item.speaker]) for item in assigned]
+
+
+def _cue_pitch(samples: np.ndarray, sample_rate: int, start: float, end: float) -> float | None:
+    left = int(start * sample_rate)
+    right = max(left + 1, int(end * sample_rate))
+    clip = samples[left:right]
+    need = int(0.45 * sample_rate)
+    if len(clip) < int(0.12 * sample_rate):
+        return None
+    if len(clip) > need:
+        hop = max(1, int(0.05 * sample_rate))
+        best_at = 0
+        best = -1.0
+        for index in range(0, len(clip) - need + 1, hop):
+            energy = float(np.sqrt(np.mean(np.square(clip[index : index + need]))))
+            if energy > best:
+                best = energy
+                best_at = index
+        clip = clip[best_at : best_at + need]
+    if float(np.sqrt(np.mean(np.square(clip)))) < 10 ** (-46 / 20):
+        return None
+    return estimate_f0(clip, sample_rate)
 
 
 def _overlap_amount(cue: Cue, turns: list[Turn]) -> float:
