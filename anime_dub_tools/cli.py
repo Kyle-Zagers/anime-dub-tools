@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--separator-model", default=DEFAULT_SEPARATOR_MODEL)
     parser.add_argument("--diarizer", choices=("auto", "pyannote", "spectral"), default="auto")
     parser.add_argument("--diarizer-model", default=DEFAULT_DIARIZER_MODEL)
-    parser.add_argument("--tts", choices=("auto", "indextts", "openvoice", "reference"), default="auto")
+    parser.add_argument("--tts", choices=("auto", "indextts", "qwen3", "openvoice", "reference"), default="auto")
     parser.add_argument("--tts-model-dir", type=Path, default=_env_path("INDEXTTS_MODEL_DIR"))
     parser.add_argument("--openvoice-dir", type=Path, default=_env_path("OPENVOICE_DIR"))
     parser.add_argument(
@@ -139,7 +139,7 @@ def _env_path(name: str) -> Path | None:
 def _needs_torch(args) -> bool:
     if args.diarizer == "pyannote":
         return True
-    if args.tts in {"indextts", "openvoice"}:
+    if args.tts in {"indextts", "qwen3", "openvoice"}:
         return True
     if args.device == "cuda":
         return True

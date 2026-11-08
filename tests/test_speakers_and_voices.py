@@ -5,7 +5,7 @@ import numpy as np
 from anime_dub_tools.audio import DIALOGUE_RATE, estimate_f0, load_mono, write_wav
 from anime_dub_tools.diarize import SpectralDiarizer, build_diarizer, diarize_samples
 from anime_dub_tools.models import DubError
-from anime_dub_tools.synthesize import ReferenceSynthesizer, build_synthesizer
+from anime_dub_tools.synthesize import ReferenceSynthesizer, build_synthesizer, qwen_voice_for
 
 from tests.fixtures import write_two_speaker_episode
 
@@ -61,5 +61,15 @@ def test_reference_voices_follow_pitch_and_loudness(tmp_path: Path):
 def test_explicit_neural_tts_requires_its_checkpoints():
     with pytest.raises(DubError, match="tts-model-dir"):
         build_synthesizer("indextts", None, None, "cpu")
+    with pytest.raises(DubError, match="tts-model-dir"):
+        build_synthesizer("qwen3", None, None, "cpu")
     with pytest.raises(DubError, match="openvoice-dir"):
         build_synthesizer("openvoice", None, None, "cpu")
+
+
+def test_qwen_voices_are_studio_presets_and_stay_put():
+    assert qwen_voice_for("c1") == "Ryan"
+    assert qwen_voice_for("c2") == "Aiden"
+    assert qwen_voice_for("c3") == "Uncle_Fu"
+    assert qwen_voice_for("c1") == qwen_voice_for("c1")
+    assert len({qwen_voice_for("c1"), qwen_voice_for("c2"), qwen_voice_for("c3")}) == 3
