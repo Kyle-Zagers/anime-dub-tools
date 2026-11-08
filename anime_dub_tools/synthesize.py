@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -430,6 +431,154 @@ class OpenVoiceSynthesizer:
         return self._ready
 
 
+# Studio voices shipped with Qwen3-TTS CustomVoice. English-native speakers
+# come first so the busiest characters are not asked to perform in a dialect
+# voice. These are not cloned from the episode.
+QWEN_STUDIO_VOICES = (
+    "Ryan",
+    "Aiden",
+    "Uncle_Fu",
+    "Eric",
+    "Dylan",
+    "Vivian",
+    "Serena",
+    "Ono_Anna",
+    "Sohee",
+)
+
+
+def qwen_voice_for(character: str) -> str:
+    """A clean preset voice for one character id.
+
+    The isolated episode clip is not a prompt. Cloning it copies the
+    separation noise into every line.
+    """
+    text = character.strip()
+    if len(text) > 1 and text[0] in {"c", "C"} and text[1:].isdigit():
+        index = int(text[1:]) - 1
+        if index >= 0:
+            return QWEN_STUDIO_VOICES[index % len(QWEN_STUDIO_VOICES)]
+    digest = int(hashlib.sha1(text.encode("utf-8")).hexdigest()[:8], 16)
+    return QWEN_STUDIO_VOICES[digest % len(QWEN_STUDIO_VOICES)]
+
+
+def character_from_reference(path: Path) -> str:
+    stem = path.stem
+    if stem.startswith("ref_"):
+        return stem[4:]
+    return stem
+
+
+class QwenSynthesizer:
+    """Qwen3-TTS CustomVoice. Preset studio voices, not a clone of the episode.
+
+    IndexTTS was copying the noise in its training data and in the separated
+    anime reference. CustomVoice speaks with the model's own clean voices.
+    One character id keeps one preset for the whole episode.
+    """
+
+    name = "qwen3"
+
+    def __init__(self, model_dir: Path, device: str) -> None:
+        self.model_dir = model_dir
+        self.device = device
+        self._model = None
+        self._seen: set[str] = set()
+        self.notice = (
+            "backend=qwen3. Qwen3-TTS CustomVoice uses its studio presets. "
+            "The isolated episode audio is not the voice prompt."
+        )
+
+    @property
+    def label(self) -> str:
+        return "qwen3"
+
+    def synthesize(
+        self,
+        text: str,
+        speaker_reference: Path,
+        emotion_reference: Path | None,
+        target_duration: float,
+        destination: Path,
+    ) -> None:
+        raw = self.infer_line(text, speaker_reference, emotion_reference, target_duration, destination)
+        try:
+            fit_duration(raw, destination, max(0.12, float(target_duration)), DIALOGUE_RATE)
+        finally:
+            raw.unlink(missing_ok=True)
+
+    def infer_line(
+        self,
+        text: str,
+        speaker_reference: Path,
+        emotion_reference: Path | None,
+        target_duration: float,
+        destination: Path,
+    ) -> Path:
+        """GPU speech only. Returns the unfitted wav. ffmpeg time-fit stays with the caller."""
+        del emotion_reference, target_duration
+        model = self._load()
+        character = character_from_reference(speaker_reference)
+        voice = qwen_voice_for(character)
+        if character not in self._seen:
+            self._seen.add(character)
+            print(f"[tts] {character}={voice}", flush=True)
+        raw = destination.with_suffix(".qwen.wav")
+        try:
+            wavs, sample_rate = model.generate_custom_voice(
+                text=text,
+                language="English",
+                speaker=voice,
+            )
+            audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+            write_wav(raw, audio, int(sample_rate))
+        except DubError:
+            raw.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            raw.unlink(missing_ok=True)
+            raise DubError(
+                "Qwen3-TTS failed while speaking a line. Check --tts-model-dir and the GPU. "
+                f"{exc}"
+            ) from exc
+        if not raw.is_file():
+            raise DubError(f"Qwen3-TTS did not write {raw}")
+        return raw
+
+    def _load(self):
+        if self._model is not None:
+            return self._model
+        if not self.model_dir.is_dir():
+            raise DubError(
+                f"Qwen3-TTS weights were not found in {self.model_dir}. "
+                "Download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice into that directory "
+                "and pass --tts-model-dir. This pipeline does not download them."
+            )
+        try:
+            import torch
+            from qwen_tts import Qwen3TTSModel
+        except ImportError as exc:
+            raise DubError(
+                "Qwen3-TTS is not installed.\n"
+                "  pip install qwen-tts\n"
+                "Flash attention is not required. SDPA is used so an AMD GPU can run it."
+            ) from exc
+        dtype = torch.bfloat16 if _nvidia_cuda(self.device) else torch.float32
+        try:
+            self._model = Qwen3TTSModel.from_pretrained(
+                str(self.model_dir),
+                device_map=self.device,
+                dtype=dtype,
+                attn_implementation="sdpa",
+            )
+        except Exception as exc:
+            raise DubError(
+                f"Could not load Qwen3-TTS weights from {self.model_dir}. "
+                f"The checkpoint files are missing or unreadable. {exc}"
+            ) from exc
+        return self._model
+
+
 def build_synthesizer(name: str, model_dir: Path | None, openvoice_dir: Path | None, device: str):
     if name == "reference":
         return ReferenceSynthesizer("auto")
@@ -437,6 +586,10 @@ def build_synthesizer(name: str, model_dir: Path | None, openvoice_dir: Path | N
         if model_dir is None:
             raise DubError("IndexTTS needs --tts-model-dir or INDEXTTS_MODEL_DIR.")
         return IndexTTSSynthesizer(model_dir, device)
+    if name == "qwen3":
+        if model_dir is None:
+            raise DubError("Qwen3-TTS needs --tts-model-dir or INDEXTTS_MODEL_DIR.")
+        return QwenSynthesizer(model_dir, device)
     if name == "openvoice":
         if openvoice_dir is None:
             raise DubError("OpenVoice needs --openvoice-dir or OPENVOICE_DIR.")
@@ -449,10 +602,11 @@ def build_synthesizer(name: str, model_dir: Path | None, openvoice_dir: Path | N
         raise DubError(
             "No speech model is configured. IndexTTS-2.5 is the voice for a real dub. "
             "Set --tts-model-dir or INDEXTTS_MODEL_DIR to a directory that contains config.yaml. "
+            "For clean studio voices, pass --tts qwen3 and a Qwen3-TTS CustomVoice directory. "
             "Missing weights stop here. "
             "--tts reference is an espeak-ng stub for wiring checks and is not a finished dub."
         )
-    raise DubError(f"Unknown TTS backend {name!r}. Use auto, indextts, openvoice, or reference.")
+    raise DubError(f"Unknown TTS backend {name!r}. Use auto, indextts, qwen3, openvoice, or reference.")
 
 
 def espeak_available() -> bool:
