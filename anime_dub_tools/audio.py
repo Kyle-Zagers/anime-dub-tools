@@ -14,14 +14,16 @@ from anime_dub_tools.models import DubError
 DIALOGUE_RATE = 22050
 BED_RATE = 44100
 LINE_FADE_SECONDS = 0.010
-# English sits with the episode instead of on top of it. The vocal-free bed
-# is a few dB under the original mix, and raw IndexTTS takes swing from a
-# whisper to nearly full scale. One active loudness, a short room, and a
-# small bed lift keep the lines even and the effects audible.
+# A 5.1 mix keeps dialogue on the center channel. Folding that channel in
+# at -3 dB is the usual Lo/Ro downmix. The LFE is left out.
+FOLD_5_1 = float(np.sqrt(0.5))
+# Lines are evened out first, then each cue is put back at the level of the
+# dialogue that was removed. A cue with no vocal estimate keeps the even level.
 DIALOGUE_ACTIVE_DB = -18.0
 DIALOGUE_GAIN_LIMIT_DB = 20.0
 DIALOGUE_SILENCE_DB = -46.0
-BED_MAKEUP_DB = 4.0
+DIALOGUE_MATCH_LIMIT_DB = 12.0
+VOCAL_PRESENT_DB = -42.0
 
 
 def require_ffmpeg() -> None:
@@ -234,22 +236,38 @@ def pad_trim_2d(samples: np.ndarray, count: int) -> np.ndarray:
     return out
 
 
-def stereo_bed(mix: np.ndarray, vocals: np.ndarray) -> np.ndarray:
-    """Stereo mix minus the vocal estimate.
+def program_stereo(mix: np.ndarray) -> np.ndarray:
+    """Stereo program a bed can be built from.
 
-    A mono source is duplicated. Channels after the stereo pair are dropped
-    so a surround track cannot keep the original dialogue. This is not the
-    separator's instrumental stem and it is not a mono downmix.
+    Six channels are treated as 5.1 in ffmpeg order: left, right, center,
+    LFE, side left, side right. The center and the surrounds are folded in,
+    because the dialogue lives on the center and the room lives in the
+    surrounds. The LFE is not folded in. A mono source is duplicated. Any
+    other layout keeps the first two channels.
     """
-    bed = np.asarray(mix, dtype=np.float32)
-    if bed.ndim == 1:
-        bed = bed[:, None]
-    if bed.ndim != 2 or bed.shape[1] < 1:
+    audio = np.asarray(mix, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    if audio.ndim != 2 or audio.shape[1] < 1:
         raise DubError("The background mix must be a (samples, channels) array.")
-    if bed.shape[1] == 1:
-        bed = np.repeat(bed, 2, axis=1)
-    else:
-        bed = bed[:, :2].copy()
+    if audio.shape[1] == 1:
+        return np.repeat(audio, 2, axis=1)
+    if audio.shape[1] >= 6:
+        center = np.float32(FOLD_5_1)
+        left = audio[:, 0] + center * audio[:, 2] + center * audio[:, 4]
+        right = audio[:, 1] + center * audio[:, 2] + center * audio[:, 5]
+        return np.stack((left, right), axis=1).astype(np.float32)
+    return audio[:, :2].copy()
+
+
+def stereo_bed(mix: np.ndarray, vocals: np.ndarray) -> np.ndarray:
+    """Program stereo minus the vocal estimate.
+
+    This is not the separator's instrumental stem. On a 5.1 source the
+    center is part of the program, so the vocal estimate has to be made
+    from that same fold or the original dialogue stays in the bed.
+    """
+    bed = program_stereo(mix)
     estimate = np.asarray(vocals, dtype=np.float32)
     if estimate.ndim == 1:
         estimate = estimate[:, None]
@@ -431,61 +449,18 @@ def _db(linear: float) -> float:
 
 
 def prepare_dialogue_line(samples: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Even the take out and put a little of the room around it.
+    """Pull a take to one active loudness. A near-silent take is left alone.
 
-    A dry close-mic take at its own peak does not sit in the episode. The
-    edge comes off, a short darker room is mixed in, and the active loudness
-    is pulled to one level. A near-silent take is left alone.
+    The scene match happens later, against the dialogue that was removed.
+    A fake room is not added here. The surrounds already carry the room,
+    and a few hard delays make a synthesized voice sound like a booth.
     """
     audio = np.asarray(samples, dtype=np.float32)
     if audio.size < 8 or sample_rate <= 0:
         return audio
     if _db(active_rms(audio)) < DIALOGUE_SILENCE_DB:
         return audio
-    voiced = _with_room(_soften_close_mic(audio), sample_rate)
-    voiced = _tame_peaks(voiced, sample_rate)
-    return _match_active_loudness(voiced)
-
-
-def _soften_close_mic(samples: np.ndarray) -> np.ndarray:
-    kernel = np.array([0.08, 0.18, 0.48, 0.18, 0.08], dtype=np.float32)
-    smooth = np.convolve(samples, kernel, mode="same")
-    return (0.62 * samples + 0.38 * smooth).astype(np.float32)
-
-
-def _with_room(samples: np.ndarray, sample_rate: int) -> np.ndarray:
-    """A small room: a few early reflections, darker than the direct voice."""
-    wet = np.zeros_like(samples)
-    for delay_ms, gain in ((12, 0.30), (19, 0.20), (31, 0.13), (47, 0.08)):
-        delay = int(round(delay_ms * sample_rate / 1000.0))
-        if delay <= 0 or delay >= len(samples):
-            continue
-        wet[delay:] += gain * samples[:-delay]
-    wet = np.convolve(wet, np.array([0.2, 0.6, 0.2], dtype=np.float32), mode="same")
-    return (samples + 0.55 * wet).astype(np.float32)
-
-
-def _tame_peaks(samples: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Pull down frames that stick out, so one shout does not set the level."""
-    frame = max(1, int(round(0.012 * sample_rate)))
-    count = len(samples)
-    padded = int(np.ceil(count / frame) * frame)
-    magnitude = np.pad(np.abs(samples), (0, padded - count))
-    envelope = magnitude.reshape(-1, frame).max(axis=1)
-    smooth = np.empty_like(envelope)
-    held = 0.0
-    for index, value in enumerate(envelope):
-        held = value if value >= held else held * 0.82
-        smooth[index] = held
-    threshold = 0.16
-    desired = np.where(
-        smooth <= threshold,
-        smooth,
-        threshold + (smooth - threshold) / 3.0,
-    )
-    frame_gain = desired / np.maximum(smooth, 1e-6)
-    gain = np.repeat(frame_gain, frame)[:count]
-    return (samples * gain).astype(np.float32)
+    return _match_active_loudness(audio)
 
 
 def _match_active_loudness(samples: np.ndarray) -> np.ndarray:
@@ -501,8 +476,30 @@ def _match_active_loudness(samples: np.ndarray) -> np.ndarray:
     return leveled.astype(np.float32)
 
 
-def bed_makeup() -> float:
-    return float(10.0 ** (BED_MAKEUP_DB / 20.0))
+def match_removed_dialogue(dialogue: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """Put one line at the loudness of the dialogue it replaces.
+
+    The reference is the vocal estimate inside the cue. When that estimate
+    is essentially silent, the evened line is left as it is.
+    """
+    voiced = np.asarray(dialogue, dtype=np.float32)
+    current = active_rms(voiced)
+    target = _reference_level(reference)
+    if current < 1e-5 or _db(target) < VOCAL_PRESENT_DB:
+        return voiced
+    gain_db = float(np.clip(_db(target) - _db(current), -DIALOGUE_MATCH_LIMIT_DB, DIALOGUE_MATCH_LIMIT_DB))
+    scaled = voiced * (10.0 ** (gain_db / 20.0))
+    peak = float(np.max(np.abs(scaled))) if scaled.size else 0.0
+    if peak > 0.63:
+        scaled = scaled * (0.63 / peak)
+    return scaled.astype(np.float32)
+
+
+def _reference_level(reference: np.ndarray) -> float:
+    audio = np.asarray(reference, dtype=np.float32)
+    if audio.ndim == 1 or audio.shape[1] == 1:
+        return active_rms(audio.reshape(-1))
+    return max(active_rms(audio[:, channel]) for channel in range(audio.shape[1]))
 
 
 def line_fade_gain(length: int, sample_rate: int) -> np.ndarray:
@@ -529,13 +526,12 @@ def mix_tracks(
     """Mix English onto the episode bed.
 
     With a vocal estimate, the whole episode becomes stereo: the original
-    pair minus that estimate, and channels past stereo are dropped so no
-    output channel still carries the source dialogue. English is leveled to
-    one active loudness, given a short room, and added inside each cue with a
-    fade of about 10 ms. The vocal-free bed is lifted a few dB so effects are
-    not buried under those lines. Overlap under a shout can still leak a
-    little. Without a separate vocal file, the original mix stays and the new
-    line is added on the stereo pair.
+    pair minus that estimate. A 5.1 source is folded first, center and
+    surrounds in, so the dialogue on the center can actually be removed.
+    English is leveled, then each cue is put back at the loudness of the
+    vocal estimate it replaces, with a fade of about 10 ms. Overlap under a
+    shout can still leak a little. Without a separate vocal file, the
+    original mix stays and the new line is added on the stereo pair.
     """
     have_vocals = vocals is not None and Path(vocals).resolve() != Path(background).resolve()
     with ThreadPoolExecutor(max_workers=cpu_workers(), thread_name_prefix="dub-mix") as pool:
@@ -550,18 +546,23 @@ def mix_tracks(
     if have_vocals and vocal_pcm is not None and vocals is not None:
         vocal_audio, vocal_rate = vocal_pcm
         estimate = _vocal_estimate_pcm(vocal_audio, vocal_rate, sample_rate, count, min(2, original.shape[1]))
-        output = stereo_bed(original, estimate) * bed_makeup()
+        output = stereo_bed(original, estimate)
+        folded = original.shape[1] >= 6
+        where = "center and surrounds folded in; " if folded else ""
         print(
-            f"[mix] bed +{BED_MAKEUP_DB:.0f} dB; dialogue at {DIALOGUE_ACTIVE_DB:.0f} dB with a short room",
+            f"[mix] {where}dialogue matched to the removed vocals",
             flush=True,
         )
     else:
         output = original.copy()
+        estimate = None
     pair = min(2, output.shape[1])
     for piece in decoded:
         if piece is None:
             continue
         start_i, end_i, dialogue, gain = piece
+        if estimate is not None:
+            dialogue = match_removed_dialogue(dialogue, estimate[start_i:end_i])
         output[start_i:end_i, :pair] += dialogue[:, None] * gain[:, None]
     written = output[:, :2] if have_vocals else output
     _write_pcm(destination, _float_to_pcm(written), sample_rate)

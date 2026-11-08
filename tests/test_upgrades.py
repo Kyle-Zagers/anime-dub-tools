@@ -9,12 +9,13 @@ import numpy as np
 import pytest
 
 from anime_dub_tools.audio import (
-    BED_MAKEUP_DB,
     BED_RATE,
+    FOLD_5_1,
     extract_audio,
     load_audio,
     mix_tracks,
     probe_audio,
+    program_stereo,
     stereo_bed,
     write_audio,
     write_wav,
@@ -58,6 +59,28 @@ def test_stereo_bed_is_stereo_and_drops_channels_past_the_pair():
     np.testing.assert_allclose(bed[:, 0], 0.3)
     np.testing.assert_allclose(bed[:, 1], -0.15)
     assert not np.allclose(bed[:, 0], bed[:, 1])
+
+
+def test_center_channel_is_folded_in_and_the_lfe_is_not():
+    mix = np.zeros((8, 6), dtype=np.float32)
+    mix[:, 0] = 0.10
+    mix[:, 1] = -0.10
+    mix[:, 2] = 0.40
+    mix[:, 3] = 0.90
+    mix[:, 4] = 0.20
+    mix[:, 5] = -0.20
+    folded = program_stereo(mix)
+    assert folded.shape == (8, 2)
+    left = 0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * 0.20
+    right = -0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * (-0.20)
+    np.testing.assert_allclose(folded[:, 0], left, atol=1e-6)
+    np.testing.assert_allclose(folded[:, 1], right, atol=1e-6)
+    vocals = np.stack((folded[:, 0], folded[:, 1]), axis=1)
+    removed = stereo_bed(mix, vocals)
+    np.testing.assert_allclose(removed, 0.0, atol=1e-6)
+    kept = stereo_bed(mix, np.zeros_like(vocals))
+    np.testing.assert_allclose(kept[:, 0], left, atol=1e-6)
+    assert float(np.max(np.abs(kept))) < 0.7
 
 
 def test_extract_keeps_channels_past_stereo(tmp_path: Path):
@@ -120,6 +143,37 @@ def test_separator_keeps_the_original_mix_and_returns_vocals(tmp_path: Path):
     assert "instrumental" not in background.name
 
 
+def test_separator_sends_the_folded_center_to_the_model(tmp_path: Path):
+    source = tmp_path / "mix.wav"
+    count = BED_RATE // 10
+    mix = np.zeros((count, 6), dtype=np.float32)
+    mix[:, 0] = 0.10
+    mix[:, 1] = -0.10
+    mix[:, 2] = 0.40
+    mix[:, 3] = 0.80
+    mix[:, 4] = 0.20
+    mix[:, 5] = -0.20
+    write_audio(source, mix, BED_RATE)
+    separator = RoformerSeparator(DEFAULT_SEPARATOR_MODEL)
+    seen: dict[str, np.ndarray] = {}
+
+    class _Fake:
+        def separate(self, path: str):
+            pair, _rate = load_audio(path)
+            seen["pair"] = pair
+            vocal_path = Path(path).with_name("model_vocals.wav")
+            write_audio(vocal_path, np.zeros_like(pair), BED_RATE)
+            return [str(vocal_path)]
+
+    separator._load = lambda work_dir: _Fake()  # type: ignore[method-assign]
+    separator.separate(source, tmp_path / "work")
+    left = 0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * 0.20
+    right = -0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * (-0.20)
+    assert seen["pair"].shape[1] == 2
+    np.testing.assert_allclose(seen["pair"][:, 0], left, atol=0.01)
+    np.testing.assert_allclose(seen["pair"][:, 1], right, atol=0.01)
+
+
 def test_missing_vocal_estimate_is_not_replaced_by_an_instrumental(tmp_path: Path):
     source = tmp_path / "mix.wav"
     write_audio(source, np.full((BED_RATE // 10, 2), 0.2, dtype=np.float32), BED_RATE)
@@ -167,21 +221,19 @@ def test_line_bed_keeps_the_marker_and_mixes_inside_the_cue(tmp_path: Path):
     assert rate == BED_RATE
     assert mixed.shape == (count, 2)
     assert mixed.shape[1] == 2
-    makeup = 10 ** (BED_MAKEUP_DB / 20.0)
-    bed_left = (0.25 - 0.30) * makeup
-    bed_right = (-0.40 - 0.10) * makeup
+    bed_left = 0.25 - 0.30
+    bed_right = -0.40 - 0.10
     np.testing.assert_allclose(mixed[marker, 0], bed_left, atol=0.002)
     np.testing.assert_allclose(mixed[marker, 1], bed_right, atol=0.002)
-    assert abs(bed_left) > abs(0.25 - 0.30)
     np.testing.assert_allclose(mixed[start - 1, 0], bed_left, atol=0.002)
     np.testing.assert_allclose(mixed[end, 0], bed_left, atol=0.002)
     interior = slice(start + int(0.020 * BED_RATE), end - int(0.020 * BED_RATE))
-    channel_gap = ((0.50 - 0.20) - (0.10 - (-0.05))) * makeup
+    channel_gap = (0.50 - 0.20) - (0.10 - (-0.05))
     np.testing.assert_allclose(mixed[interior, 0] - mixed[interior, 1], channel_gap, atol=0.02)
-    voiced = mixed[interior, 0] - (0.50 - 0.20) * makeup
+    voiced = mixed[interior, 0] - (0.50 - 0.20)
     assert float(np.sqrt(np.mean(voiced**2))) > 0.05
     assert float(np.max(np.abs(voiced))) < 0.7
-    edge = mixed[start + int(0.005 * BED_RATE), 0] - (0.50 - 0.20) * makeup
+    edge = mixed[start + int(0.005 * BED_RATE), 0] - (0.50 - 0.20)
     assert abs(float(edge)) < float(np.max(np.abs(voiced)))
 
 

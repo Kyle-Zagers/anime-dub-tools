@@ -9,6 +9,7 @@ from anime_dub_tools.audio import (
     BED_RATE,
     load_audio,
     pad_trim_2d,
+    program_stereo,
     resample_linear,
     write_audio,
 )
@@ -46,7 +47,9 @@ class RoformerSeparator:
             "backend=roformer. Kimberley Jensen Mel-Band RoFormer bleedless "
             f"({model_filename}) at {BED_RATE} Hz. The vocal estimate is removed "
             "from the whole episode, and the bed written out is stereo. "
-            "Sounds that overlap speech can still be lost with the vocal estimate."
+            "A 5.1 mix is folded, center and surrounds in, before the vocal "
+            "estimate is made. Sounds that overlap speech can still be lost "
+            "with the vocal estimate."
         )
 
     def separate(self, audio: Path, work_dir: Path) -> tuple[Path, Path]:
@@ -174,10 +177,8 @@ def _at_bed_rate(audio: np.ndarray, sample_rate: int) -> np.ndarray:
 
 
 def _stereo_pair(mix: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
-    if mix.shape[1] == 1:
-        return np.repeat(mix, 2, axis=1), None
     extra = mix[:, 2:] if mix.shape[1] > 2 else None
-    return mix[:, :2], extra
+    return program_stereo(mix), extra
 
 
 def _as_stereo(vocals: np.ndarray) -> np.ndarray:
