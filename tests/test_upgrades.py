@@ -61,7 +61,7 @@ def test_stereo_bed_is_stereo_and_drops_channels_past_the_pair():
     assert not np.allclose(bed[:, 0], bed[:, 1])
 
 
-def test_center_channel_is_folded_in_and_the_lfe_is_not():
+def test_center_dialogue_is_left_out_of_the_bed():
     mix = np.zeros((8, 6), dtype=np.float32)
     mix[:, 0] = 0.10
     mix[:, 1] = -0.10
@@ -71,16 +71,16 @@ def test_center_channel_is_folded_in_and_the_lfe_is_not():
     mix[:, 5] = -0.20
     folded = program_stereo(mix)
     assert folded.shape == (8, 2)
-    left = 0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * 0.20
-    right = -0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * (-0.20)
+    left = 0.10 + FOLD_5_1 * 0.20
+    right = -0.10 + FOLD_5_1 * (-0.20)
     np.testing.assert_allclose(folded[:, 0], left, atol=1e-6)
     np.testing.assert_allclose(folded[:, 1], right, atol=1e-6)
+    assert float(np.max(np.abs(folded))) < 0.3
     vocals = np.stack((folded[:, 0], folded[:, 1]), axis=1)
     removed = stereo_bed(mix, vocals)
     np.testing.assert_allclose(removed, 0.0, atol=1e-6)
     kept = stereo_bed(mix, np.zeros_like(vocals))
     np.testing.assert_allclose(kept[:, 0], left, atol=1e-6)
-    assert float(np.max(np.abs(kept))) < 0.7
 
 
 def test_extract_keeps_channels_past_stereo(tmp_path: Path):
@@ -167,8 +167,8 @@ def test_separator_sends_the_folded_center_to_the_model(tmp_path: Path):
 
     separator._load = lambda work_dir: _Fake()  # type: ignore[method-assign]
     separator.separate(source, tmp_path / "work")
-    left = 0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * 0.20
-    right = -0.10 + FOLD_5_1 * 0.40 + FOLD_5_1 * (-0.20)
+    left = 0.10 + FOLD_5_1 * 0.20
+    right = -0.10 + FOLD_5_1 * (-0.20)
     assert seen["pair"].shape[1] == 2
     np.testing.assert_allclose(seen["pair"][:, 0], left, atol=0.01)
     np.testing.assert_allclose(seen["pair"][:, 1], right, atol=0.01)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from anime_dub_tools.models import AssignedCue, Cue, SpeakerRow, Turn, overlap
 
 
@@ -101,6 +103,28 @@ def fit_window(cue: Cue, turns: list[Turn]) -> tuple[float, float]:
     """
     del turns
     return cue.start, max(cue.start, cue.end)
+
+
+def acoustic_speakers(assigned: list[AssignedCue], turns: list[Turn]) -> list[AssignedCue]:
+    """Give each cue the voice that is actually talking on the dialogue bus.
+
+    The script id is a guess from the English words. On a 5.1 episode the
+    center channel is the performance, so the diarizer of that channel is
+    the voice. A cue with no overlap keeps the script id.
+    """
+    if not turns:
+        return assigned
+    voiced: list[AssignedCue] = []
+    for item in assigned:
+        if _overlap_amount(item.cue, turns) <= 0:
+            voiced.append(item)
+            continue
+        voiced.append(replace(item, speaker=_speaker_for_cue(item.cue, turns)))
+    return voiced
+
+
+def _overlap_amount(cue: Cue, turns: list[Turn]) -> float:
+    return max((overlap(cue.start, cue.end, turn.start, turn.end) for turn in turns), default=0.0)
 
 
 def _speaker_for_cue(cue: Cue, turns: list[Turn]) -> str:

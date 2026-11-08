@@ -236,14 +236,23 @@ def pad_trim_2d(samples: np.ndarray, count: int) -> np.ndarray:
     return out
 
 
+def write_dialogue_bus(source: Path, destination: Path) -> bool:
+    """Write the center channel of a 5.1 file. That channel is the dialogue."""
+    audio, sample_rate = load_audio(source)
+    if audio.ndim != 2 or audio.shape[1] < 6:
+        return False
+    write_audio(destination, audio[:, 2:3], sample_rate)
+    return True
+
+
 def program_stereo(mix: np.ndarray) -> np.ndarray:
     """Stereo program a bed can be built from.
 
     Six channels are treated as 5.1 in ffmpeg order: left, right, center,
-    LFE, side left, side right. The center and the surrounds are folded in,
-    because the dialogue lives on the center and the room lives in the
-    surrounds. The LFE is not folded in. A mono source is duplicated. Any
-    other layout keeps the first two channels.
+    LFE, side left, side right. The center is the dialogue bus and is left
+    out, and so is the LFE. Left, right, and the surrounds stay, so the
+    music and effects remain. A mono source is duplicated. Any other layout
+    keeps the first two channels.
     """
     audio = np.asarray(mix, dtype=np.float32)
     if audio.ndim == 1:
@@ -253,9 +262,9 @@ def program_stereo(mix: np.ndarray) -> np.ndarray:
     if audio.shape[1] == 1:
         return np.repeat(audio, 2, axis=1)
     if audio.shape[1] >= 6:
-        center = np.float32(FOLD_5_1)
-        left = audio[:, 0] + center * audio[:, 2] + center * audio[:, 4]
-        right = audio[:, 1] + center * audio[:, 2] + center * audio[:, 5]
+        fold = np.float32(FOLD_5_1)
+        left = audio[:, 0] + fold * audio[:, 4]
+        right = audio[:, 1] + fold * audio[:, 5]
         return np.stack((left, right), axis=1).astype(np.float32)
     return audio[:, :2].copy()
 
@@ -264,8 +273,8 @@ def stereo_bed(mix: np.ndarray, vocals: np.ndarray) -> np.ndarray:
     """Program stereo minus the vocal estimate.
 
     This is not the separator's instrumental stem. On a 5.1 source the
-    center is part of the program, so the vocal estimate has to be made
-    from that same fold or the original dialogue stays in the bed.
+    center dialogue is already absent. The vocal estimate has to be made
+    from this same effects bed, so leakage off the center is what gets removed.
     """
     bed = program_stereo(mix)
     estimate = np.asarray(vocals, dtype=np.float32)
@@ -348,6 +357,22 @@ def fit_duration(source: Path, destination: Path, duration: float, sample_rate: 
             temporary.unlink(missing_ok=True)
             stretched.unlink(missing_ok=True)
     write_wav(destination, fitted, sample_rate)
+
+
+def place_natural(source: Path, destination: Path, sample_rate: int = DIALOGUE_RATE) -> float:
+    """Write the take at the speed it was generated.
+
+    Stretching a short line out to the subtitle cue makes the voice sound
+    slow. The cue still decides where the line starts. Returns the duration
+    actually written.
+    """
+    samples = load_mono(source, sample_rate)
+    if len(samples) < 8:
+        count = max(1, int(round(0.12 * sample_rate)))
+        write_wav(destination, np.zeros(count, dtype=np.float32), sample_rate)
+        return count / sample_rate
+    write_wav(destination, samples, sample_rate)
+    return len(samples) / sample_rate
 
 
 def estimate_f0(samples: np.ndarray, sample_rate: int, fmin: float = 70.0, fmax: float = 500.0) -> float:
@@ -526,12 +551,12 @@ def mix_tracks(
     """Mix English onto the episode bed.
 
     With a vocal estimate, the whole episode becomes stereo: the original
-    pair minus that estimate. A 5.1 source is folded first, center and
-    surrounds in, so the dialogue on the center can actually be removed.
-    English is leveled, then each cue is put back at the loudness of the
-    vocal estimate it replaces, with a fade of about 10 ms. Overlap under a
-    shout can still leak a little. Without a separate vocal file, the
-    original mix stays and the new line is added on the stereo pair.
+    pair minus that estimate. A 5.1 source leaves the center dialogue out
+    and keeps the surrounds. English is leveled, then each cue is put back
+    at the loudness of the center dialogue it replaces, with a fade of about
+    10 ms. Overlap under a shout can still leak a little. Without a separate
+    vocal file, the original mix stays and the new line is added on the
+    stereo pair.
     """
     have_vocals = vocals is not None and Path(vocals).resolve() != Path(background).resolve()
     with ThreadPoolExecutor(max_workers=cpu_workers(), thread_name_prefix="dub-mix") as pool:
@@ -548,9 +573,9 @@ def mix_tracks(
         estimate = _vocal_estimate_pcm(vocal_audio, vocal_rate, sample_rate, count, min(2, original.shape[1]))
         output = stereo_bed(original, estimate)
         folded = original.shape[1] >= 6
-        where = "center and surrounds folded in; " if folded else ""
+        where = "center dialogue left out; " if folded else ""
         print(
-            f"[mix] {where}dialogue matched to the removed vocals",
+            f"[mix] {where}English matched to the center when it is there",
             flush=True,
         )
     else:
@@ -562,7 +587,11 @@ def mix_tracks(
             continue
         start_i, end_i, dialogue, gain = piece
         if estimate is not None:
-            dialogue = match_removed_dialogue(dialogue, estimate[start_i:end_i])
+            if original.shape[1] >= 6:
+                reference = original[start_i:end_i, 2]
+            else:
+                reference = estimate[start_i:end_i]
+            dialogue = match_removed_dialogue(dialogue, reference)
         output[start_i:end_i, :pair] += dialogue[:, None] * gain[:, None]
     written = output[:, :2] if have_vocals else output
     _write_pcm(destination, _float_to_pcm(written), sample_rate)

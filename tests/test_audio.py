@@ -11,6 +11,7 @@ from anime_dub_tools.audio import (
     estimate_f0,
     fit_duration,
     load_mono,
+    place_natural,
     mix_tracks,
     prepare_dialogue_line,
     write_wav,
@@ -57,6 +58,23 @@ def test_duration_fit_hits_shorter_and_longer_targets(tmp_path: Path):
         fit_duration(source, destination, target, DIALOGUE_RATE)
         audio = load_mono(destination, DIALOGUE_RATE)
         assert abs(len(audio) / DIALOGUE_RATE - target) < 0.02
+
+
+def test_a_short_line_is_not_slowed_to_fill_the_cue(tmp_path: Path):
+    source = tmp_path / "source.wav"
+    count = DIALOGUE_RATE
+    time = np.arange(count, dtype=np.float32) / DIALOGUE_RATE
+    write_wav(source, 0.4 * np.sin(2 * np.pi * 220 * time), DIALOGUE_RATE)
+    destination = tmp_path / "natural.wav"
+    spoken = place_natural(source, destination, DIALOGUE_RATE)
+    audio = load_mono(destination, DIALOGUE_RATE)
+    assert abs(spoken - 1.0) < 0.02
+    assert abs(len(audio) / DIALOGUE_RATE - 1.0) < 0.02
+    window = audio * np.hanning(len(audio))
+    spectrum = np.abs(np.fft.rfft(window))
+    freqs = np.fft.rfftfreq(len(audio), d=1.0 / DIALOGUE_RATE)
+    peak = float(freqs[1 + int(np.argmax(spectrum[1:]))])
+    assert abs(peak - 220) < 4
 
 
 def test_f0_and_envelope_follow_the_source():

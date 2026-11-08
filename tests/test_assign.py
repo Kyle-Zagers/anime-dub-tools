@@ -1,5 +1,5 @@
-from anime_dub_tools.assign import assign_cues, fit_window, reference_intervals, speaker_rows
-from anime_dub_tools.models import Cue, Turn
+from anime_dub_tools.assign import acoustic_speakers, assign_cues, fit_window, reference_intervals, speaker_rows
+from anime_dub_tools.models import AssignedCue, Cue, Turn
 
 
 def test_actor_names_stay_consistent_when_diarization_flips():
@@ -62,3 +62,15 @@ def test_unnamed_line_without_overlap_uses_the_nearest_speaker():
     turns = [Turn(0.0, 1.0, "SPEAKER_00"), Turn(1.2, 2.0, "SPEAKER_01")]
     assigned = assign_cues(cues, turns)
     assert assigned[0].speaker == "SPEAKER_01"
+
+
+def test_acoustic_speakers_replace_a_script_id_when_the_center_overlaps():
+    cues = [
+        AssignedCue(Cue(1, 0.0, 1.0, "Look out.", None), "c1", 0.0, 1.0),
+        AssignedCue(Cue(2, 1.2, 2.2, "I heard you.", None), "c1", 1.2, 2.2),
+        AssignedCue(Cue(3, 8.0, 8.4, "Off mic.", None), "c2", 8.0, 8.4),
+    ]
+    turns = [Turn(0.0, 1.0, "SPEAKER_00"), Turn(1.2, 2.2, "SPEAKER_01")]
+    voiced = acoustic_speakers(cues, turns)
+    assert [item.speaker for item in voiced] == ["SPEAKER_00", "SPEAKER_01", "c2"]
+    assert voiced[0].line_text() == "Look out."
