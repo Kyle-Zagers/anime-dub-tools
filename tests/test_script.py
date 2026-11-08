@@ -112,6 +112,124 @@ def test_a_diarizer_label_is_not_a_character():
         parse_script_response(json.dumps({"lines": [{"index": 1, "character": "SPEAKER_01", "text": "Where?"}]}), cues)
 
 
+# The local model closed the lines array after the credit, then kept writing objects.
+_EARLY_CLOSE = """{"lines": [{"index": 1, "character": null, "text": "Edited at https://subtitletools.com"}], 
+{"index": 2, "character": "c1", "text": "Did you see that?"}, 
+{"index": 3, "character": "c2", "text": "It's him!"}, 
+{"index": 4, "character": "c2", "text": "That's the fabled..."}, 
+{"index": 5, "character": "c2", "text": "Devil Z!"}, 
+{"index": 6, "character": "c2", "text": "Devil Z"}, 
+{"index": 7, "character": "c3", "text": "Several months earlier"}, 
+{"index": 8, "character": "c1", "text": "You've gotta be kidding!"}, 
+{"index": 9, "character": "c1", "text": "It's true! We're university students."}, 
+{"index": 10, "character": "c3", "text": "Right, Akio?"}, 
+{"index": 11, "character": "c3", "text": "What was it, again?"}, 
+{"index": 12, "character": "c1", "text": "Don't blow our cover, idiot."}, 
+{"index": 13, "character": "c1", "text": "Let's just give up on them and go home."}, 
+{"index": 14, "character": "c2", "text": "So, what university are you guys at?"}, 
+{"index": 15, "character": "c3", "text": "Oh, uh... Tokyo U, yeah."}, 
+{"index": 16, "character": "c2", "text": "Hey..."}, 
+{"index": 17, "character": "c1", "text": "Akio, what the hell was that?"}, 
+{"index": 18, "character": "c3", "text": "It's the BlackBird!"}, 
+{"index": 19, "character": "c2", "text": "You mean that BlackBird?"}, 
+{"index": 20, "character": "c3", "text": "Let's go, Maa!"}}"""
+
+_EARLY_CLOSE_CUES = [
+    Cue(1, 0.0, 0.033, "Edited at https://subtitletools.com", None),
+    Cue(2, 1.0, 2.0, "Did you see that?", None),
+    Cue(3, 2.0, 3.0, "It's him!", None),
+    Cue(4, 3.0, 4.0, "That's the fabled...", None),
+    Cue(5, 4.0, 5.0, "Devil Z!", None),
+    Cue(6, 5.0, 6.0, "Devil Z", None),
+    Cue(7, 6.0, 7.0, "Several months earlier", None),
+    Cue(8, 7.0, 8.0, "You've gotta be kidding!", None),
+    Cue(9, 8.0, 9.0, "It's true! We're university students.", None),
+    Cue(10, 9.0, 10.0, "Right, Akio?", None),
+    Cue(11, 10.0, 11.0, "What was it, again?", None),
+    Cue(12, 11.0, 12.0, "Don't blow our cover, idiot.", None),
+    Cue(13, 12.0, 13.0, "Let's just give up on them and go home.", None),
+    Cue(14, 13.0, 14.0, "So, what university are you guys at?", None),
+    Cue(15, 14.0, 15.0, "Oh, uh... Tokyo U, yeah.", None),
+    Cue(16, 15.0, 16.0, "Hey...", None),
+    Cue(17, 16.0, 17.0, "Akio, what the hell was that?", None),
+    Cue(18, 17.0, 18.0, "It's the BlackBird!", None),
+    Cue(19, 18.0, 19.0, "You mean that BlackBird?", None),
+    Cue(20, 19.0, 20.0, "Let's go, Maa!", None),
+]
+
+
+def test_early_array_close_skips_the_credit_and_keeps_the_later_objects():
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(_EARLY_CLOSE)
+    calls = {"n": 0}
+
+    def complete(messages):
+        del messages
+        calls["n"] += 1
+        return _EARLY_CLOSE
+
+    lines = script_from_complete(complete, _EARLY_CLOSE_CUES, chunk_size=20)
+    assert calls["n"] == 1
+    assert [line.index for line in lines] == list(range(2, 21))
+    assert [line.character for line in lines[:5]] == ["c1", "c2", "c2", "c2", "c2"]
+    assert {line.character for line in lines} == {"c1", "c2", "c3"}
+    assert all(not line.character.upper().startswith("SPEAKER_") for line in lines)
+    assigned = apply_script(_EARLY_CLOSE_CUES, lines, [])
+    assert [item.cue.index for item in assigned] == list(range(2, 21))
+    assert all("subtitletools.com" not in item.line_text() for item in assigned)
+
+
+def test_a_spoken_line_with_a_url_and_no_character_is_not_skipped():
+    cues = [Cue(1, 0.0, 1.0, "Look at https://example.com now.", None)]
+    payload = json.dumps({"lines": [{"index": 1, "character": None, "text": cues[0].text}]})
+    with pytest.raises(DubError, match="no character id"):
+        parse_script_response(payload, cues)
+
+
+def test_one_retry_then_stop_with_the_cue_range_and_raw_reply():
+    cues = [Cue(1, 0.0, 1.0, "Where?", None), Cue(2, 1.2, 2.0, "Here.", None)]
+    replies = ["this is not json", "still not json {{{"]
+
+    def complete(messages):
+        del messages
+        return replies.pop(0)
+
+    with pytest.raises(DubError, match="cues 1-2") as exc:
+        script_from_complete(complete, cues, chunk_size=2)
+    text = str(exc.value)
+    assert "still not json" in text
+    assert "espeak-ng" in text
+    assert "SPEAKER_n" in text
+    assert replies == []
+
+
+def test_a_second_reply_is_accepted_and_a_diarizer_label_is_not_retried():
+    cues = [Cue(1, 0.0, 1.0, "Where?", None)]
+    replies = [
+        "not json",
+        json.dumps({"lines": [{"index": 1, "character": "c1", "text": "Where?"}]}),
+    ]
+
+    def complete(messages):
+        del messages
+        return replies.pop(0)
+
+    lines = script_from_complete(complete, cues, chunk_size=1)
+    assert [line.character for line in lines] == ["c1"]
+    assert replies == []
+
+    calls = {"n": 0}
+
+    def labeled(messages):
+        del messages
+        calls["n"] += 1
+        return json.dumps({"lines": [{"index": 1, "character": "SPEAKER_01", "text": "Where?"}]})
+
+    with pytest.raises(DubError, match="SPEAKER_01"):
+        script_from_complete(labeled, cues, chunk_size=1)
+    assert calls["n"] == 1
+
+
 def test_later_chunk_sees_the_roster():
     cues = [
         Cue(1, 0.0, 1.0, "Mira, look.", None),
