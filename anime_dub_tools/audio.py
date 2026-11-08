@@ -14,6 +14,14 @@ from anime_dub_tools.models import DubError
 DIALOGUE_RATE = 22050
 BED_RATE = 44100
 LINE_FADE_SECONDS = 0.010
+# English sits with the episode instead of on top of it. The vocal-free bed
+# is a few dB under the original mix, and raw IndexTTS takes swing from a
+# whisper to nearly full scale. One active loudness, a short room, and a
+# small bed lift keep the lines even and the effects audible.
+DIALOGUE_ACTIVE_DB = -18.0
+DIALOGUE_GAIN_LIMIT_DB = 20.0
+DIALOGUE_SILENCE_DB = -46.0
+BED_MAKEUP_DB = 4.0
 
 
 def require_ffmpeg() -> None:
@@ -403,6 +411,100 @@ def normalize_peak(samples: np.ndarray, peak: float = 0.9) -> np.ndarray:
     return samples * (peak / current)
 
 
+def active_rms(samples: np.ndarray) -> float:
+    """RMS of the samples that are actually the voice, not the cue's silence."""
+    audio = np.asarray(samples, dtype=np.float32)
+    if audio.size == 0:
+        return 0.0
+    peak = float(np.max(np.abs(audio)))
+    if peak < 1e-5:
+        return 0.0
+    mask = np.abs(audio) > max(peak * 0.1, 1e-4)
+    used = audio[mask]
+    if used.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(used * used)))
+
+
+def _db(linear: float) -> float:
+    return float(20.0 * np.log10(max(linear, 1e-8)))
+
+
+def prepare_dialogue_line(samples: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Even the take out and put a little of the room around it.
+
+    A dry close-mic take at its own peak does not sit in the episode. The
+    edge comes off, a short darker room is mixed in, and the active loudness
+    is pulled to one level. A near-silent take is left alone.
+    """
+    audio = np.asarray(samples, dtype=np.float32)
+    if audio.size < 8 or sample_rate <= 0:
+        return audio
+    if _db(active_rms(audio)) < DIALOGUE_SILENCE_DB:
+        return audio
+    voiced = _with_room(_soften_close_mic(audio), sample_rate)
+    voiced = _tame_peaks(voiced, sample_rate)
+    return _match_active_loudness(voiced)
+
+
+def _soften_close_mic(samples: np.ndarray) -> np.ndarray:
+    kernel = np.array([0.08, 0.18, 0.48, 0.18, 0.08], dtype=np.float32)
+    smooth = np.convolve(samples, kernel, mode="same")
+    return (0.62 * samples + 0.38 * smooth).astype(np.float32)
+
+
+def _with_room(samples: np.ndarray, sample_rate: int) -> np.ndarray:
+    """A small room: a few early reflections, darker than the direct voice."""
+    wet = np.zeros_like(samples)
+    for delay_ms, gain in ((12, 0.30), (19, 0.20), (31, 0.13), (47, 0.08)):
+        delay = int(round(delay_ms * sample_rate / 1000.0))
+        if delay <= 0 or delay >= len(samples):
+            continue
+        wet[delay:] += gain * samples[:-delay]
+    wet = np.convolve(wet, np.array([0.2, 0.6, 0.2], dtype=np.float32), mode="same")
+    return (samples + 0.55 * wet).astype(np.float32)
+
+
+def _tame_peaks(samples: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Pull down frames that stick out, so one shout does not set the level."""
+    frame = max(1, int(round(0.012 * sample_rate)))
+    count = len(samples)
+    padded = int(np.ceil(count / frame) * frame)
+    magnitude = np.pad(np.abs(samples), (0, padded - count))
+    envelope = magnitude.reshape(-1, frame).max(axis=1)
+    smooth = np.empty_like(envelope)
+    held = 0.0
+    for index, value in enumerate(envelope):
+        held = value if value >= held else held * 0.82
+        smooth[index] = held
+    threshold = 0.16
+    desired = np.where(
+        smooth <= threshold,
+        smooth,
+        threshold + (smooth - threshold) / 3.0,
+    )
+    frame_gain = desired / np.maximum(smooth, 1e-6)
+    gain = np.repeat(frame_gain, frame)[:count]
+    return (samples * gain).astype(np.float32)
+
+
+def _match_active_loudness(samples: np.ndarray) -> np.ndarray:
+    current = active_rms(samples)
+    current_db = _db(current)
+    if current < 1e-5 or current_db < DIALOGUE_SILENCE_DB:
+        return samples
+    gain_db = float(np.clip(DIALOGUE_ACTIVE_DB - current_db, -DIALOGUE_GAIN_LIMIT_DB, DIALOGUE_GAIN_LIMIT_DB))
+    leveled = samples * (10.0 ** (gain_db / 20.0))
+    peak = float(np.max(np.abs(leveled)))
+    if peak > 0.63:
+        leveled = leveled * (0.63 / peak)
+    return leveled.astype(np.float32)
+
+
+def bed_makeup() -> float:
+    return float(10.0 ** (BED_MAKEUP_DB / 20.0))
+
+
 def line_fade_gain(length: int, sample_rate: int) -> np.ndarray:
     """Rise and fall inside one line. About 10 ms, never past the line edges."""
     gain = np.ones(length, dtype=np.float32)
@@ -428,10 +530,12 @@ def mix_tracks(
 
     With a vocal estimate, the whole episode becomes stereo: the original
     pair minus that estimate, and channels past stereo are dropped so no
-    output channel still carries the source dialogue. English is added inside
-    each cue with a fade of about 10 ms. Overlap under a shout can still leak
-    a little. Without a separate vocal file, the original mix stays and the
-    new line is added on the stereo pair.
+    output channel still carries the source dialogue. English is leveled to
+    one active loudness, given a short room, and added inside each cue with a
+    fade of about 10 ms. The vocal-free bed is lifted a few dB so effects are
+    not buried under those lines. Overlap under a shout can still leak a
+    little. Without a separate vocal file, the original mix stays and the new
+    line is added on the stereo pair.
     """
     have_vocals = vocals is not None and Path(vocals).resolve() != Path(background).resolve()
     with ThreadPoolExecutor(max_workers=cpu_workers(), thread_name_prefix="dub-mix") as pool:
@@ -446,7 +550,11 @@ def mix_tracks(
     if have_vocals and vocal_pcm is not None and vocals is not None:
         vocal_audio, vocal_rate = vocal_pcm
         estimate = _vocal_estimate_pcm(vocal_audio, vocal_rate, sample_rate, count, min(2, original.shape[1]))
-        output = stereo_bed(original, estimate)
+        output = stereo_bed(original, estimate) * bed_makeup()
+        print(
+            f"[mix] bed +{BED_MAKEUP_DB:.0f} dB; dialogue at {DIALOGUE_ACTIVE_DB:.0f} dB with a short room",
+            flush=True,
+        )
     else:
         output = original.copy()
     pair = min(2, output.shape[1])
@@ -474,6 +582,7 @@ def _decode_line(
     mono, line_rate = _line_mono(path)
     if line_rate != sample_rate and len(mono):
         mono = resample_linear(mono, max(1, int(round(len(mono) * sample_rate / line_rate))))
+    mono = prepare_dialogue_line(mono, sample_rate)
     start_i = int(round(start * sample_rate))
     if start_i < 0:
         mono = mono[-start_i:]

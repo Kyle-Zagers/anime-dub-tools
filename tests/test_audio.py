@@ -3,13 +3,16 @@ from pathlib import Path
 import numpy as np
 
 from anime_dub_tools.audio import (
+    DIALOGUE_ACTIVE_DB,
     DIALOGUE_RATE,
+    active_rms,
     amplitude_envelope,
     apply_envelope,
     estimate_f0,
     fit_duration,
     load_mono,
     mix_tracks,
+    prepare_dialogue_line,
     write_wav,
 )
 
@@ -83,5 +86,31 @@ def test_mix_places_a_line_on_a_silent_bed(tmp_path: Path):
     mixed = load_mono(out, DIALOGUE_RATE)
     start = int(0.25 * DIALOGUE_RATE)
     assert float(np.max(np.abs(mixed[:start]))) < 1e-4
-    assert float(np.max(np.abs(mixed[start : start + 1000]))) > 0.2
+    body = mixed[start + 800 : start + 4000]
+    peak = float(np.max(np.abs(body)))
+    assert 0.05 < peak < 0.4
     assert float(np.max(np.abs(mixed))) <= 0.98
+
+
+def test_loud_and_quiet_lines_land_on_one_level():
+    rate = 44100
+    time = np.arange(rate, dtype=np.float32) / rate
+    loud = prepare_dialogue_line(0.55 * np.sin(2 * np.pi * 180 * time), rate)
+    quiet = prepare_dialogue_line(0.02 * np.sin(2 * np.pi * 180 * time), rate)
+    loud_db = 20 * np.log10(max(active_rms(loud), 1e-8))
+    quiet_db = 20 * np.log10(max(active_rms(quiet), 1e-8))
+    assert abs(loud_db - DIALOGUE_ACTIVE_DB) < 1.5
+    assert abs(quiet_db - DIALOGUE_ACTIVE_DB) < 1.5
+    assert abs(loud_db - quiet_db) < 1.0
+
+
+def test_a_dry_impulse_picks_up_a_short_room():
+    rate = 44100
+    impulse = np.zeros(rate // 2, dtype=np.float32)
+    impulse[0] = 0.8
+    rendered = prepare_dialogue_line(impulse, rate)
+    direct = float(np.max(np.abs(rendered[: int(0.008 * rate)])))
+    tail = float(np.max(np.abs(rendered[int(0.012 * rate) : int(0.06 * rate)])))
+    assert direct > 0.02
+    assert tail > direct * 0.04
+    assert tail < direct
