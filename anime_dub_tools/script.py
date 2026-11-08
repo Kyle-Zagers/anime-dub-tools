@@ -270,6 +270,8 @@ def _script_rows(payload: str) -> list:
                 "The script model did not return JSON. No speakers were invented from diarizer labels."
             )
         return salvaged
+    if isinstance(data, list):
+        return data
     rows = data.get("lines") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         raise UnreadableScript("The script model JSON has no lines array.")

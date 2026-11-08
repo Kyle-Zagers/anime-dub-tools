@@ -186,6 +186,33 @@ def test_a_spoken_line_with_a_url_and_no_character_is_not_skipped():
         parse_script_response(payload, cues)
 
 
+def test_a_bare_array_of_line_objects_is_a_valid_chunk():
+    payload = (
+        '[{"index": 21, "character": "c1", "text": "W–What?!"}, '
+        '{"index": 22, "character": "c2", "text": "Woo-hoo! Go get him!"}]'
+    )
+    parsed = json.loads(payload)
+    assert isinstance(parsed, list)
+    cues = [
+        Cue(21, 20.0, 21.0, "W–What?!", None),
+        Cue(22, 21.0, 22.0, "Woo-hoo! Go get him!", None),
+    ]
+    calls = {"n": 0}
+
+    def complete(messages):
+        del messages
+        calls["n"] += 1
+        return payload
+
+    lines = script_from_complete(complete, cues, chunk_size=2)
+    assert calls["n"] == 1
+    assert [(line.index, line.character) for line in lines] == [(21, "c1"), (22, "c2")]
+    assert all(not line.character.upper().startswith("SPEAKER_") for line in lines)
+    assigned = apply_script(cues, lines, [])
+    assert [item.speaker for item in assigned] == ["c1", "c2"]
+    assert [item.line_text() for item in assigned] == ["W–What?!", "Woo-hoo! Go get him!"]
+
+
 def test_one_retry_then_stop_with_the_cue_range_and_raw_reply():
     cues = [Cue(1, 0.0, 1.0, "Where?", None), Cue(2, 1.2, 2.0, "Here.", None)]
     replies = ["this is not json", "still not json {{{"]
