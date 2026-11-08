@@ -104,7 +104,7 @@ def test_loud_and_quiet_lines_land_on_one_level():
     assert abs(loud_db - quiet_db) < 1.0
 
 
-def test_a_dry_impulse_picks_up_a_short_room():
+def test_a_leveled_line_stays_dry():
     rate = 44100
     impulse = np.zeros(rate // 2, dtype=np.float32)
     impulse[0] = 0.8
@@ -112,5 +112,4 @@ def test_a_dry_impulse_picks_up_a_short_room():
     direct = float(np.max(np.abs(rendered[: int(0.008 * rate)])))
     tail = float(np.max(np.abs(rendered[int(0.012 * rate) : int(0.06 * rate)])))
     assert direct > 0.02
-    assert tail > direct * 0.04
-    assert tail < direct
+    assert tail < direct * 0.02
