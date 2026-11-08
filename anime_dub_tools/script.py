@@ -21,7 +21,21 @@ _WORD = re.compile(r"[A-Za-z0-9']+")
 _LEADING_DASH = re.compile(r"^(?:[-\u2013\u2014]+\s*)+")
 _NOTES = re.compile(r"[♪♫]+")
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_CREDIT_LINE = re.compile(
+    r"^(?:edited|subtitles?|translated|translation|typeset|timing|timed|encoded|fansub|credits?)\b",
+    re.IGNORECASE,
+)
 _CHUNK = 20
+_SNIPPET = 240
+
+
+class UnreadableScript(DubError):
+    """The reply could not be read as one character id per speech cue.
+
+    A diarizer label is a different error. It is not retried into a voice.
+    """
+
 
 SYSTEM_PROMPT = """You write a dubbing script from English subtitle cues.
 
@@ -76,11 +90,22 @@ def faithful_spoken(original: str, proposed: str | None) -> str:
 
 
 def require_character(value: object) -> str:
-    if not isinstance(value, str):
+    character = character_id(value)
+    if character is None:
         raise DubError("The script returned a line with no character id.")
+    return character
+
+
+def character_id(value: object) -> str | None:
+    """A character id, or None when the model left the field empty.
+
+    A SPEAKER_n value is refused here. Callers do not substitute a diarizer label.
+    """
+    if not isinstance(value, str):
+        return None
     character = value.strip()
     if not character:
-        raise DubError("The script returned a line with no character id.")
+        return None
     if _DIARIZER_LABEL.fullmatch(character):
         raise DubError(
             f"The script used {character}, which is a diarizer label, not a character. "
@@ -90,35 +115,59 @@ def require_character(value: object) -> str:
     return character
 
 
+def is_nonspeech_credit(text: str) -> bool:
+    """A credit line or a cue that is only a URL.
+
+    Dialogue that happens to mention a URL is kept. This is only for lines
+    that are not speech, such as an editor credit with a link.
+    """
+    cleaned = light_cleanup(text)
+    if not cleaned or not _URL.search(cleaned):
+        return False
+    if not words(_URL.sub(" ", cleaned)):
+        return True
+    return _CREDIT_LINE.search(cleaned) is not None
+
+
 def parse_script_response(payload: str, cues: list[Cue]) -> list[ScriptLine]:
-    try:
-        data = json.loads(_FENCE.sub("", payload.strip()))
-    except json.JSONDecodeError as exc:
-        raise DubError(
-            "The script model did not return JSON. No speakers were invented from diarizer labels."
-        ) from exc
-    rows = data.get("lines") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        raise DubError("The script model JSON has no lines array.")
+    rows = _script_rows(payload)
+    by_cue = {cue.index: cue for cue in cues}
     found: dict[int, ScriptLine] = {}
+    skipped: set[int] = set()
     for row in rows:
         if not isinstance(row, dict):
-            raise DubError("The script model returned a line that is not an object.")
+            raise UnreadableScript("The script model returned a line that is not an object.")
         try:
             index = int(row["index"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise DubError("The script model returned a line with no cue index.") from exc
+            raise UnreadableScript("The script model returned a line with no cue index.") from exc
+        if index not in by_cue:
+            raise UnreadableScript("The script model returned a cue index that is not in this chunk.")
+        if index in found or index in skipped:
+            raise UnreadableScript(f"The script model returned cue {index} more than once.")
         text = row.get("text", "")
         if not isinstance(text, str):
             text = ""
-        found[index] = ScriptLine(index=index, character=require_character(row.get("character")), text=text)
-    expected = [cue.index for cue in cues]
-    if sorted(found) != sorted(expected):
-        raise DubError(
+        character = character_id(row.get("character"))
+        if character is None:
+            if is_nonspeech_credit(by_cue[index].text):
+                _skip_credit(index)
+                skipped.add(index)
+                continue
+            raise UnreadableScript("The script returned a line with no character id.")
+        found[index] = ScriptLine(index=index, character=character, text=text)
+    for cue in cues:
+        if cue.index in found or cue.index in skipped:
+            continue
+        if is_nonspeech_credit(cue.text):
+            _skip_credit(cue.index)
+            skipped.add(cue.index)
+            continue
+        raise UnreadableScript(
             "The script model did not return exactly one character id for every subtitle cue. "
             "No diarizer label was used in its place."
         )
-    return [found[index] for index in expected]
+    return [found[cue.index] for cue in cues if cue.index in found]
 
 
 class ScriptLine:
@@ -129,16 +178,26 @@ class ScriptLine:
 
 
 def apply_script(cues: list[Cue], lines: list[ScriptLine], turns: list[Turn]) -> list[AssignedCue]:
-    """The script id is the voice. The cue timing stays the subtitle cue."""
+    """The script id is the voice. The cue timing stays the subtitle cue.
+
+    A non-speech credit or URL-only cue may be absent. Every other cue needs
+    the character id the model chose.
+    """
     by_index = {line.index: line for line in lines}
-    if len(by_index) != len(lines) or sorted(by_index) != sorted(cue.index for cue in cues):
+    if len(by_index) != len(lines):
         raise DubError(
-            "The script does not cover every subtitle cue once. "
-            "No diarizer label was used in its place."
+            "The script repeated a cue index. No diarizer label was used in its place."
         )
     assigned: list[AssignedCue] = []
     for cue in cues:
-        line = by_index[cue.index]
+        line = by_index.pop(cue.index, None)
+        if line is None:
+            if is_nonspeech_credit(cue.text):
+                continue
+            raise DubError(
+                "The script does not cover every subtitle cue once. "
+                "No diarizer label was used in its place."
+            )
         spoken = faithful_spoken(cue.text, line.text)
         if line.text.strip() and words(line.text) != words(spoken):
             print(f"[script] line {cue.index} kept the subtitle wording", flush=True)
@@ -151,6 +210,11 @@ def apply_script(cues: list[Cue], lines: list[ScriptLine], turns: list[Turn]) ->
                 end=end,
                 spoken=spoken,
             )
+        )
+    if by_index:
+        raise DubError(
+            "The script does not cover every subtitle cue once. "
+            "No diarizer label was used in its place."
         )
     return assigned
 
@@ -171,20 +235,91 @@ def script_from_complete(complete: Complete, cues: list[Cue], chunk_size: int = 
     known = {item["character"] for item in roster}
     for start in range(0, len(cues), chunk_size):
         chunk = cues[start : start + chunk_size]
-        payload = complete(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _user_payload(chunk, roster)},
-            ]
-        )
-        parsed = parse_script_response(payload, chunk)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _user_payload(chunk, roster)},
+        ]
+        payload = complete(messages)
+        try:
+            parsed = parse_script_response(payload, chunk)
+        except UnreadableScript:
+            payload = complete(messages)
+            try:
+                parsed = parse_script_response(payload, chunk)
+            except UnreadableScript as exc:
+                raise DubError(_unreadable_chunk(chunk, payload, exc)) from exc
         written.extend(parsed)
-        for line, cue in zip(parsed, chunk):
-            if line.character in known:
+        parsed_by_index = {line.index: line for line in parsed}
+        for cue in chunk:
+            line = parsed_by_index.get(cue.index)
+            if line is None or line.character in known:
                 continue
             known.add(line.character)
             roster.append({"character": line.character, "example": cue.text[:160]})
     return written
+
+
+def _script_rows(payload: str) -> list:
+    text = _FENCE.sub("", payload.strip())
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        salvaged = _salvage_line_objects(text)
+        if not salvaged:
+            raise UnreadableScript(
+                "The script model did not return JSON. No speakers were invented from diarizer labels."
+            )
+        return salvaged
+    rows = data.get("lines") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise UnreadableScript("The script model JSON has no lines array.")
+    return rows
+
+
+def _salvage_line_objects(payload: str) -> list[dict]:
+    """Read line objects after a reply closes the lines array and keeps writing.
+
+    json.loads rejects that document. Each line object is still valid JSON,
+    so scan for those objects and keep them in order.
+    """
+    decoder = json.JSONDecoder()
+    found: list[dict] = []
+    index = 0
+    length = len(payload)
+    while index < length:
+        start = payload.find("{", index)
+        if start < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(payload, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(value, dict) and "index" in value and "lines" not in value:
+            found.append(value)
+        index = max(end, start + 1)
+    return found
+
+
+def _skip_credit(index: int) -> None:
+    print(f"[script] skip cue {index} non-speech credit", flush=True)
+
+
+def _unreadable_chunk(chunk: list[Cue], payload: str, exc: UnreadableScript) -> str:
+    first = chunk[0].index
+    last = chunk[-1].index
+    return (
+        f"The script model reply for cues {first}-{last} is still unreadable. "
+        "This does not fall back to espeak-ng, and it does not use unlabeled SPEAKER_n. "
+        f"{exc} Reply: {_snippet(payload)}"
+    )
+
+
+def _snippet(payload: str) -> str:
+    compact = re.sub(r"\s+", " ", payload).strip()
+    if len(compact) <= _SNIPPET:
+        return compact
+    return compact[:_SNIPPET] + "..."
 
 
 def _user_payload(cues: list[Cue], roster: list[dict[str, str]]) -> str:
