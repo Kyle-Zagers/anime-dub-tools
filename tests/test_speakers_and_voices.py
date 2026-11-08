@@ -81,6 +81,8 @@ def test_qwen_voices_are_studio_presets_and_stay_put():
     assert qwen_voice_for("SPEAKER_00") == "Ryan"
     assert qwen_voice_for("SPEAKER_01") == "Aiden"
     assert qwen_voice_for("SPEAKER_00") != qwen_voice_for("SPEAKER_01")
+    assert qwen_voice_for("Ryan") == "Ryan"
+    assert qwen_voice_for("Vivian") == "Vivian"
 
 
 def test_a_short_line_cannot_run_for_a_minute():

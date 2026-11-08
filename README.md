@@ -2,7 +2,7 @@
 
 Dub one anime episode into English. The input is the episode (video or audio) and its English subtitles. The output is the same episode with English dialogue mixed over the music and effects.
 
-Speaker identity comes from the episode. A language model reads the English cues in order and gives each line a stable character id. The same person keeps that id for the whole episode, including lines that never say a name. Diarization can still cluster the audio, but a raw cluster label is not a character: one id is one voice, built from that character's own isolated dialogue. There is no voice library and no cast list.
+The spoken words are the subtitle lines. Who says each line comes from the isolated Japanese: lines in the same scene are clustered by voice, the same voice is linked across scenes, and a line keeps the previous voice unless the Japanese is clearly closer to someone else. A cluster gets a female studio voice only when its pitch is confidently high across the whole cluster. Everyone else gets a male studio voice. There is no cast list.
 
 The episode stays on your machine. This repository does not download, store, or ship any show.
 
@@ -10,10 +10,13 @@ The episode stays on your machine. This repository does not download, store, or 
 
 ```bash
 export ANIME_DUB_SCRIPT_MODEL=/path/to/model.gguf
+export QWEN_TTS_MODEL_DIR=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice
+export HUGGINGFACE_API_KEY=hf_...
 
-python -m anime_dub_tools --episode EPISODE --subs SUBS --out dubbed.mkv \
-  --script-model "$ANIME_DUB_SCRIPT_MODEL"
+python -m anime_dub_tools --episode EPISODE --subs SUBS --out dubbed.mkv
 ```
+
+That is the whole run. The episode and the English subtitles are the only files the command takes. The script model, the Qwen voice weights, and the Hugging Face token come from the environment. Separator, diarizer, and device stay on their defaults: RoFormer, pyannote, and the largest GPU PyTorch can see.
 
 `EPISODE` can be a video or an audio file. `SUBS` is `.ass` or `.srt`. The words in the subtitle file are what gets spoken. Pass English subtitles. This tool does not translate.
 
@@ -64,7 +67,7 @@ sudo apt-get install -y ffmpeg espeak-ng
 
 The default command isolates vocals, diarizes, and synthesizes. The quality of each stage depends on what is installed. Nothing below is bundled, and gated weights are not downloaded for you.
 
-A real episode still needs a GPU, a Hugging Face token for pyannote, a local script model, and a local IndexTTS-2.5 checkpoint directory. MuseTalk weights are needed only when you pass `--lips`. Without them the picture is copied and the log says so. Missing IndexTTS, separator, or script-model weights stop with an error instead of a traceback.
+A real episode still needs a GPU, a Hugging Face token for pyannote, a local script model, and a local Qwen3-TTS CustomVoice directory in `QWEN_TTS_MODEL_DIR`. With those set, the command above is the whole dub. MuseTalk weights are needed only when you pass `--lips`. Without them the picture is copied and the log says so. Missing Qwen, separator, or script-model weights stop with an error instead of a traceback.
 
 | Stage | Backend | Install | Credentials |
 | --- | --- | --- | --- |

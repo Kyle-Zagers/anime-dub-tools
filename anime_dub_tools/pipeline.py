@@ -3,17 +3,16 @@ from __future__ import annotations
 import hashlib
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from anime_dub_tools.assign import (
-    acoustic_speakers,
+    cue_pitch,
     emotion_interval,
     format_line_log,
     format_speaker_map,
-    pitch_ordered_voices,
     reference_intervals,
     speaker_rows,
 )
@@ -38,6 +37,7 @@ from anime_dub_tools.script import apply_script, script_configuration_error
 from anime_dub_tools.separate import dialogue_for_voices
 from anime_dub_tools.subtitles import parse_subtitles
 from anime_dub_tools.synthesize import emo_alpha_for_line
+from anime_dub_tools.voices import embed_cues, load_speaker_embedder, stable_voices
 
 
 def dub_episode(
@@ -75,7 +75,13 @@ def dub_episode(
             f"[script] lines={len(script)} characters={len({line.character for line in script})}",
             flush=True,
         )
-        print("[script] character ids come from the subtitle script; diarizer labels are not voices", flush=True)
+        if getattr(synthesizer, "name", None) == "qwen3":
+            print("[script] the spoken words stay the subtitle line", flush=True)
+        else:
+            print(
+                "[script] character ids come from the subtitle script; diarizer labels are not voices",
+                flush=True,
+            )
 
         print(f"[separate] {separator.name}", flush=True)
         _emit_notice(separator)
@@ -92,20 +98,32 @@ def dub_episode(
         assigned = apply_script(cues, script, turns)
         if getattr(synthesizer, "name", None) == "qwen3":
             bus = work_dir / "dialogue-bus.wav"
-            voice_audio = None
             if write_dialogue_bus(extracted, bus):
+                print("[voices] isolating the Japanese dialogue", flush=True)
                 voice_audio = dialogue_for_voices(bus, separator, work_dir / "dialogue-vocals")
-                print("[voices] diarizing the isolated Japanese", flush=True)
-                voice_turns = diarizer.diarize(voice_audio)
             else:
-                voice_turns = turns
-            count = len({turn.speaker for turn in voice_turns})
-            print(f"[voices] turns={len(voice_turns)} speakers={count}", flush=True)
-            assigned = acoustic_speakers(assigned, voice_turns)
-            if voice_audio is not None:
-                isolated = load_mono(voice_audio, 16000)
-                assigned = pitch_ordered_voices(assigned, isolated, 16000)
-            print("[voices] each voice follows the isolated Japanese speaker", flush=True)
+                voice_audio = vocals
+            isolated = load_mono(voice_audio, 16000)
+            spans = [(item.cue.start, item.cue.end) for item in assigned]
+            print("[voices] embedding each Japanese line", flush=True)
+            embedder = load_speaker_embedder(
+                getattr(diarizer, "token", None),
+                getattr(diarizer, "device", "cpu"),
+            )
+            embedded = embed_cues(isolated, 16000, spans, embedder)
+            pitches = [cue_pitch(isolated, 16000, start, end) for start, end in spans]
+            names = stable_voices(
+                embedded,
+                np.asarray([start for start, _end in spans]),
+                np.asarray([end for _start, end in spans]),
+                pitches,
+            )
+            assigned = [replace(item, speaker=name) for item, name in zip(assigned, names)]
+            print(
+                f"[voices] presets={len(set(names))} "
+                "a line keeps its voice unless the Japanese is clearly someone else",
+                flush=True,
+            )
         rows = speaker_rows(assigned)
         print(format_speaker_map(rows), flush=True)
         print(format_line_log(assigned), flush=True)

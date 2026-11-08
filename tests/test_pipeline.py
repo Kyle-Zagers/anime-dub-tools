@@ -132,6 +132,7 @@ def _run(
     env.pop("HF_TOKEN", None)
     env.pop("HUGGING_FACE_HUB_TOKEN", None)
     env.pop("INDEXTTS_MODEL_DIR", None)
+    env.pop("QWEN_TTS_MODEL_DIR", None)
     env.pop("OPENVOICE_DIR", None)
     env.pop("MUSETALK_MODEL_DIR", None)
     env.pop("ANIME_DUB_SCRIPT_API_KEY", None)
