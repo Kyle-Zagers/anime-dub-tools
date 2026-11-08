@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from anime_dub_tools.assign import (
+    acoustic_speakers,
     emotion_interval,
     format_line_log,
     format_speaker_map,
@@ -24,8 +25,10 @@ from anime_dub_tools.audio import (
     mix_tracks,
     mux,
     normalize_peak,
+    place_natural,
     require_ffmpeg,
     slice_samples,
+    write_dialogue_bus,
     write_wav,
 )
 from anime_dub_tools.models import AssignedCue, DubError, Turn
@@ -85,6 +88,17 @@ def dub_episode(
             print("[diarize] no speech turns found; cue audio is sliced per character", flush=True)
 
         assigned = apply_script(cues, script, turns)
+        if getattr(synthesizer, "name", None) == "qwen3":
+            bus = work_dir / "dialogue-bus.wav"
+            if write_dialogue_bus(extracted, bus):
+                print("[voices] diarizing the center channel", flush=True)
+                voice_turns = diarizer.diarize(bus)
+            else:
+                voice_turns = turns
+            count = len({turn.speaker for turn in voice_turns})
+            print(f"[voices] turns={len(voice_turns)} speakers={count}", flush=True)
+            assigned = acoustic_speakers(assigned, voice_turns)
+            print("[voices] each voice follows the center-channel speaker", flush=True)
         rows = speaker_rows(assigned)
         print(format_speaker_map(rows), flush=True)
         print(format_line_log(assigned), flush=True)
@@ -93,7 +107,10 @@ def dub_episode(
         references = _write_references(work_dir, vocal_audio, assigned, turns, pool)
         print(f"[tts] {synthesizer.label}", flush=True)
         _emit_notice(synthesizer)
-        print("[tts] next-line prep and time-fit overlap this line", flush=True)
+        if getattr(synthesizer, "natural_speed", False):
+            print("[tts] lines stay at the speed they were generated", flush=True)
+        else:
+            print("[tts] next-line prep and time-fit overlap this line", flush=True)
         rendered = _render_lines(
             assigned, duration, work_dir, vocal_audio, turns, references, synthesizer, pool
         )
@@ -217,6 +234,9 @@ def _render_lines(assigned, duration, work_dir, vocal_audio, turns, references, 
         if raw is None:
             return job.destination, job.start, job.end
         try:
+            if getattr(synthesizer, "natural_speed", False):
+                spoken = place_natural(raw, job.destination, DIALOGUE_RATE)
+                return job.destination, job.start, job.start + spoken
             fit_duration(raw, job.destination, job.end - job.start, DIALOGUE_RATE)
         finally:
             raw.unlink(missing_ok=True)

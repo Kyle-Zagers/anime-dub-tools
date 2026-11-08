@@ -46,8 +46,8 @@ class RoformerSeparator:
         self.notice = (
             "backend=roformer. Kimberley Jensen Mel-Band RoFormer bleedless "
             f"({model_filename}) at {BED_RATE} Hz. The vocal estimate is removed "
-            "from the whole episode, and the bed written out is stereo. "
-            "A 5.1 mix is folded, center and surrounds in, before the vocal "
+            "from the effects bed, and the bed written out is stereo. "
+            "On a 5.1 mix the center dialogue is left out before the vocal "
             "estimate is made. Sounds that overlap speech can still be lost "
             "with the vocal estimate."
         )

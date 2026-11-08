@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +14,7 @@ from anime_dub_tools.audio import (
     apply_envelope,
     estimate_f0,
     fit_duration,
+    place_natural,
     load_mono,
     normalize_peak,
     pitch_shift,
@@ -451,9 +453,17 @@ def qwen_voice_for(character: str) -> str:
     """A clean preset voice for one character id.
 
     The isolated episode clip is not a prompt. Cloning it copies the
-    separation noise into every line.
+    separation noise into every line. A diarizer label uses the same list,
+    in the order the labels are numbered.
     """
     text = character.strip()
+    numbered = re.fullmatch(r"(?:SPEAKER_)?(\d+)", text, flags=re.IGNORECASE)
+    if numbered:
+        index = int(numbered.group(1))
+        if text[0] in {"c", "C"}:
+            index -= 1
+        if index >= 0:
+            return QWEN_STUDIO_VOICES[index % len(QWEN_STUDIO_VOICES)]
     if len(text) > 1 and text[0] in {"c", "C"} and text[1:].isdigit():
         index = int(text[1:]) - 1
         if index >= 0:
@@ -478,6 +488,7 @@ class QwenSynthesizer:
     """
 
     name = "qwen3"
+    natural_speed = True
 
     def __init__(self, model_dir: Path, device: str) -> None:
         self.model_dir = model_dir
@@ -503,7 +514,7 @@ class QwenSynthesizer:
     ) -> None:
         raw = self.infer_line(text, speaker_reference, emotion_reference, target_duration, destination)
         try:
-            fit_duration(raw, destination, max(0.12, float(target_duration)), DIALOGUE_RATE)
+            place_natural(raw, destination, DIALOGUE_RATE)
         finally:
             raw.unlink(missing_ok=True)
 

@@ -73,3 +73,6 @@ def test_qwen_voices_are_studio_presets_and_stay_put():
     assert qwen_voice_for("c3") == "Uncle_Fu"
     assert qwen_voice_for("c1") == qwen_voice_for("c1")
     assert len({qwen_voice_for("c1"), qwen_voice_for("c2"), qwen_voice_for("c3")}) == 3
+    assert qwen_voice_for("SPEAKER_00") == "Ryan"
+    assert qwen_voice_for("SPEAKER_01") == "Aiden"
+    assert qwen_voice_for("SPEAKER_00") != qwen_voice_for("SPEAKER_01")
