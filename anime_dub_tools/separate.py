@@ -134,6 +134,20 @@ class RoformerSeparator:
         raise DubError(f"Separator reported missing output {raw}")
 
 
+def dialogue_for_voices(bus: Path, separator, work_dir: Path) -> Path:
+    """Audio the voice diarizer should hear.
+
+    The raw center channel still carries engines and music, and those glue
+    different speakers into one cluster. When RoFormer is the separator, the
+    diarizer hears the vocal estimate of that center. Otherwise it hears the
+    center itself.
+    """
+    if getattr(separator, "name", None) != "roformer":
+        return bus
+    vocals, _background = separator.separate(bus, work_dir)
+    return vocals
+
+
 def separator_available() -> bool:
     try:
         import audio_separator.separator  # noqa: F401
