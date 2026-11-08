@@ -449,6 +449,18 @@ QWEN_STUDIO_VOICES = (
 )
 
 
+def qwen_token_budget(text: str) -> int:
+    """Cap a line so a short cue cannot run away for a minute.
+
+    CustomVoice is 12 codec frames per second. About 14 characters of
+    English fit in one second. A short line still gets four seconds, and a
+    long line gets two and a half times a normal reading.
+    """
+    words = text.replace("\n", " ").strip()
+    seconds = max(4.0, len(words) / 14.0 * 2.5)
+    return int(seconds * 12)
+
+
 def qwen_voice_for(character: str) -> str:
     """A clean preset voice for one character id.
 
@@ -540,6 +552,7 @@ class QwenSynthesizer:
                 text=text,
                 language="English",
                 speaker=voice,
+                max_new_tokens=qwen_token_budget(text),
             )
             audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
             write_wav(raw, audio, int(sample_rate))

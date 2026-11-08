@@ -5,7 +5,12 @@ import numpy as np
 from anime_dub_tools.audio import DIALOGUE_RATE, estimate_f0, load_mono, write_wav
 from anime_dub_tools.diarize import SpectralDiarizer, build_diarizer, diarize_samples
 from anime_dub_tools.models import DubError
-from anime_dub_tools.synthesize import ReferenceSynthesizer, build_synthesizer, qwen_voice_for
+from anime_dub_tools.synthesize import (
+    ReferenceSynthesizer,
+    build_synthesizer,
+    qwen_token_budget,
+    qwen_voice_for,
+)
 
 from tests.fixtures import write_two_speaker_episode
 
@@ -76,3 +81,15 @@ def test_qwen_voices_are_studio_presets_and_stay_put():
     assert qwen_voice_for("SPEAKER_00") == "Ryan"
     assert qwen_voice_for("SPEAKER_01") == "Aiden"
     assert qwen_voice_for("SPEAKER_00") != qwen_voice_for("SPEAKER_01")
+
+
+def test_a_short_line_cannot_run_for_a_minute():
+    short = qwen_token_budget("But...")
+    number = qwen_token_budget("Te 53-681.")
+    long = qwen_token_budget(
+        "Name - Asakura Akio Place of Residence: Kanagawa prefecture, Yokohama City, Nakaku"
+    )
+    assert short == 48
+    assert number == 48
+    assert long > short
+    assert long < 12 * 20
